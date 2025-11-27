@@ -232,9 +232,14 @@ class AceDeviceDiscovery:
         return ace_devices
 
     @staticmethod
-    def probe_ace_device(port, baud=115200, timeout=2.0):
+    def probe_ace_device(port, baud=115200, timeout=2.0, usb_location=None):
         """
         Connect to a port and verify it's an ACE device
+        Args:
+            port: Serial port path
+            baud: Baud rate (default 115200)
+            timeout: Serial timeout (default 2.0s)
+            usb_location: USB bus-port location (e.g., "1-1.2") for device_id fallback
         Returns: Device info dict or None if not ACE
         """
         try:
@@ -282,6 +287,9 @@ class AceDeviceDiscovery:
                             response_json = json.loads(response_payload.decode('utf-8'))
                             if 'result' in response_json:
                                 result = response_json['result']
+                                # Add USB location to result for device_id generation
+                                if usb_location:
+                                    result['usb_location'] = usb_location
                                 device_id = AceDeviceDiscovery._generate_device_id(result)
 
                                 ser.close()
@@ -307,21 +315,30 @@ class AceDeviceDiscovery:
     def _generate_device_id(device_info):
         """
         Generate unique device ID from device info
-        Priority: MAC > Serial Number > Firmware+Model hash
+        Priority: MAC > Serial Number > USB Location > Firmware+Model hash
         """
         import hashlib
 
         # Best: MAC address (if available)
         if 'mac_address' in device_info and device_info['mac_address']:
-            return f"mac_{device_info['mac_address']}"
+            mac = device_info['mac_address'].replace(':', '')
+            return f"mac_{mac}"
 
         # Good: Serial number
         if 'serial_number' in device_info and device_info['serial_number']:
             return f"sn_{device_info['serial_number']}"
 
-        # Fallback: Hash of firmware + model (not ideal, changes on firmware update)
+        # Better fallback: USB location (bus-port, unique per physical USB port)
+        if 'usb_location' in device_info and device_info['usb_location']:
+            # USB location like "1-1.2" is stable as long as device stays in same port
+            usb_loc = device_info['usb_location'].replace('.', '_').replace('-', '_')
+            return f"usb_{usb_loc}"
+
+        # Last resort: Hash of firmware + model (NOT unique across identical devices)
+        # This will cause issues if you have multiple identical ACE units
         unique_str = f"{device_info.get('model', '')}_{device_info.get('firmware', '')}"
         hash_val = hashlib.md5(unique_str.encode()).hexdigest()[:8]
+        logging.warning(f"ACE: Using firmware hash for device_id (not unique!). Please ensure your ACE firmware reports MAC or Serial Number.")
         return f"fw_{hash_val}"
 
 
@@ -1804,15 +1821,19 @@ class AceManager:
             ace_wrapper = AceConfigWrapper(self.printer, f"ace {ace_name}", ace_config, config)
             ace_instance = BunnyAce(ace_wrapper)
 
+            # Get device_id from device_ids mapping, or generate fallback
+            device_id = self.device_ids.get(port, f"port_{i}")  # Fallback for non-auto-detect
+
             # Store device info
             self.ace_devices.append({
                 'name': ace_name,
                 'port': port,
                 'instance': ace_instance,
-                'gate_offset': i * 4
+                'gate_offset': i * 4,
+                'device_id': device_id
             })
 
-            logging.info(f"ACE Manager: Created {ace_name} on {port} with gate offset {i * 4}")
+            logging.info(f"ACE Manager: Created {ace_name} (ID: {device_id}) on {port} with gate offset {i * 4}")
 
     def _setup_auto_detect(self, config):
         """Auto-detect ACE devices and create instances using USB enumeration"""
@@ -1833,9 +1854,10 @@ class AceManager:
         verified_devices = []
         for dev_info in discovered_devices:
             port = dev_info['port']
+            usb_loc = dev_info.get('location')
             logging.info(f"ACE Manager: Probing {port}...")
 
-            ace_info = AceDeviceDiscovery.probe_ace_device(port)
+            ace_info = AceDeviceDiscovery.probe_ace_device(port, usb_location=usb_loc)
             if ace_info:
                 verified_devices.append({
                     'port': port,
@@ -1875,12 +1897,13 @@ class AceManager:
 
         logging.info(f"ACE Manager: Setting up {len(device_names)} named ACE devices")
 
-        for name in device_names:
+        for i, name in enumerate(device_names):
             self.ace_devices.append({
                 'name': name,
                 'port': 'managed',  # Will be set by individual config
                 'instance': None,  # Will be linked in _handle_ready
-                'gate_offset': 0  # Will be calculated
+                'gate_offset': 0,  # Will be calculated
+                'device_id': f"named_{name}"  # Fallback ID for named devices
             })
 
     def _handle_ready(self):
@@ -1988,8 +2011,10 @@ class AceManager:
             raise self.gcode.error(f"Invalid gate {global_gate} (valid: 0-{self.total_gates-1})")
 
         for device in self.ace_devices:
-            if global_gate < device['gate_offset'] + 4:
-                local_gate = global_gate - device['gate_offset']
+            offset = device['gate_offset']
+            # Check if gate is in this device's range [offset, offset+4)
+            if global_gate >= offset and global_gate < offset + 4:
+                local_gate = global_gate - offset
                 return device['instance'], local_gate
 
         raise self.gcode.error(f"Cannot route gate {global_gate}")
@@ -2109,18 +2134,35 @@ class AceManager:
                 'health': self._get_device_health(ace)
             })
 
-        # Build per-device gate data (for fixing gate editing bug)
+        # Build per-device gate data with device-specific variables
         # This allows UI to know which gates belong to which device
         devices_detail = []
         for dev in self.ace_devices:
             ace = dev['instance']
             status = ace.get_status()
+            device_id = dev.get('device_id', f"dev_{dev['gate_offset']}")
+
+            # Read device-specific gate configuration from save_variables
+            # Fall back to device's own status if device-specific vars don't exist
+            gate_color = ace.save_variables.allVariables.get(
+                f'ace_{device_id}_gate_color',
+                status.get('gate_color', ['FFFFFF'] * 4)
+            )
+            gate_material = ace.save_variables.allVariables.get(
+                f'ace_{device_id}_gate_type',
+                status.get('gate_material', [''] * 4)
+            )
+            gate_temp = ace.save_variables.allVariables.get(
+                f'ace_{device_id}_gate_temp',
+                status.get('gate_temp', [230] * 4)
+            )
+
             devices_detail.append({
-                'device_id': dev.get('device_id', f"dev_{dev['gate_offset']}"),
+                'device_id': device_id,
                 'gate_offset': dev['gate_offset'],
-                'gate_color': status.get('gate_color', []),
-                'gate_material': status.get('gate_material', []),
-                'gate_temp': status.get('gate_temp', []),
+                'gate_color': gate_color,
+                'gate_material': gate_material,
+                'gate_temp': gate_temp,
                 'active_gate': status.get('active_gate', []),
                 'spool_id': list(range(dev['gate_offset'] + 1, dev['gate_offset'] + 5))
             })
@@ -2365,25 +2407,40 @@ class AceManager:
     cmd_ACE_GATE_MAP_help = 'Set gate info (unified across all ACE devices)'
 
     def cmd_ACE_GATE_MAP(self, gcmd):
-        """Unified gate mapping"""
+        """Unified gate mapping with device-specific variable storage"""
         gate = gcmd.get_int('GATE')
         ace_instance, local_gate = self._route_to_ace(gate)
 
-        # Forward to ACE with local gate number
-        # This needs more work to properly handle the gate parameter
+        # Find the device_id for this ACE instance
+        device_id = None
+        for dev in self.ace_devices:
+            if dev['instance'] == ace_instance:
+                device_id = dev.get('device_id', f"dev_{dev['gate_offset']}")
+                break
+
+        if not device_id:
+            self.gcode.respond_info("Error: Could not identify device")
+            logging.error(f"ACE Manager: Could not find device_id for gate {gate}")
+            return
+
+        # Use device-specific variable names to avoid cross-contamination
         color = gcmd.get('COLOR', None)
         type_param = gcmd.get('TYPE', None)
         temp = gcmd.get_int('TEMP', None)
 
         if color:
-            ace_instance.save_variables.allVariables.setdefault('ace_gate_color', ['FFFFFF'] * ace_instance.num_gates)[local_gate] = color
+            var_name = f'ace_{device_id}_gate_color'
+            ace_instance.save_variables.allVariables.setdefault(var_name, ['FFFFFF'] * 4)[local_gate] = color
         if type_param:
-            ace_instance.save_variables.allVariables.setdefault('ace_gate_type', [''] * ace_instance.num_gates)[local_gate] = type_param
+            var_name = f'ace_{device_id}_gate_type'
+            ace_instance.save_variables.allVariables.setdefault(var_name, [''] * 4)[local_gate] = type_param
         if temp:
-            ace_instance.save_variables.allVariables.setdefault('ace_gate_temp', [230] * ace_instance.num_gates)[local_gate] = temp
+            var_name = f'ace_{device_id}_gate_temp'
+            ace_instance.save_variables.allVariables.setdefault(var_name, [230] * 4)[local_gate] = temp
 
         if color or type_param or temp:
             ace_instance.write_variables()
+            logging.info(f"ACE Manager: Updated gate {gate} on device {device_id} (local gate {local_gate})")
 
     cmd_ACE_SCAN_DEVICES_help = 'Scan for ACE devices and report findings'
 
