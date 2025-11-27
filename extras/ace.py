@@ -2948,12 +2948,61 @@ class AceManager:
                         self.name = name
                         self.ace_config = ace_config
                         self.parent_config = parent_config
+                        # Provide fileconfig attribute if parent has one
+                        if parent_config and hasattr(parent_config, 'fileconfig'):
+                            self.fileconfig = parent_config.fileconfig
+                        else:
+                            self.fileconfig = None
 
                     def get_printer(self):
                         return self.printer
 
                     def get_name(self):
                         return self.name
+
+                    def get(self, key, default=None):
+                        if key in self.ace_config:
+                            val = self.ace_config[key]
+                            return default if val is None else val
+                        return default
+
+                    def getint(self, key, default=None, minval=None, maxval=None):
+                        val = self.get(key, default)
+                        if val is None:
+                            return default
+                        result = int(val)
+                        if minval is not None and result < minval:
+                            raise self.error(f"Option '{key}' must be >= {minval}")
+                        if maxval is not None and result > maxval:
+                            raise self.error(f"Option '{key}' must be <= {maxval}")
+                        return result
+
+                    def getfloat(self, key, default=None, minval=None, maxval=None):
+                        val = self.get(key, default)
+                        if val is None:
+                            return default
+                        result = float(val)
+                        if minval is not None and result < minval:
+                            raise self.error(f"Option '{key}' must be >= {minval}")
+                        if maxval is not None and result > maxval:
+                            raise self.error(f"Option '{key}' must be <= {maxval}")
+                        return result
+
+                    def getboolean(self, key, default=None):
+                        val = self.get(key, default)
+                        if val is None:
+                            return default
+                        if isinstance(val, bool):
+                            return val
+                        return str(val).lower() in ('true', '1', 'yes')
+
+                    def getlist(self, key, default=None):
+                        val = self.get(key, default)
+                        if val is None:
+                            return default if default is not None else []
+                        if isinstance(val, list):
+                            return val
+                        return [item.strip() for item in str(val).split(',') if item.strip()]
 
                     def getsection(self, section):
                         class FileconfigSectionWrapper:
