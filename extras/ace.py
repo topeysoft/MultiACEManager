@@ -2089,6 +2089,22 @@ class AceManager:
                 'health': self._get_device_health(ace)
             })
 
+        # Build per-device gate data (for fixing gate editing bug)
+        # This allows UI to know which gates belong to which device
+        devices_detail = []
+        for dev in self.ace_devices:
+            ace = dev['instance']
+            status = ace.get_status()
+            devices_detail.append({
+                'device_id': dev.get('device_id', f"dev_{dev['gate_offset']}"),
+                'gate_offset': dev['gate_offset'],
+                'gate_color': status.get('gate_color', []),
+                'gate_material': status.get('gate_material', []),
+                'gate_temp': status.get('gate_temp', []),
+                'active_gate': status.get('active_gate', []),
+                'spool_id': list(range(dev['gate_offset'] + 1, dev['gate_offset'] + 5))
+            })
+
         return {
             'status': overall_status,
             'temp': overall_temp,
@@ -2103,6 +2119,7 @@ class AceManager:
             'num_gates': self.total_gates,
             'num_devices': len(self.ace_devices),
             'devices': devices_summary,
+            'devices_detail': devices_detail,  # NEW: Per-device gate data
         }
 
     def get_device_list(self):
