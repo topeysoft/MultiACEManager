@@ -1665,7 +1665,7 @@ class AceManager:
         # Pre-read all possible config parameters to make them "valid" in Klipper's eyes
         # This prevents "Option X is not valid" errors during config validation
         # We don't use these values here, but reading them registers them as valid options
-        config.getint('baud', 115200)
+        self.baud = config.getint('baud', 115200)
         config.get('extruder_sensor_pin', None)
         config.get('toolhead_sensor_pin', None)
         config.getint('extruder_move_speed', 10)
