@@ -2506,7 +2506,7 @@ class AceManager:
         current_device_ids = {d.get('device_id'): d for d in current_devices}
 
         # Discover all ACE devices on USB ports
-        discovered = AceDeviceDiscovery.scan_ports()
+        discovered = AceDeviceDiscovery.find_ace_devices()
 
         if not discovered:
             logging.warning("ACE Manager: No ACE devices found during re-enumeration")
@@ -2524,21 +2524,23 @@ class AceManager:
         verified_devices = []
         for device_info in discovered:
             port = device_info.get('port')
+            usb_location = device_info.get('location')
+
             if not port:
                 continue
 
             try:
                 # Probe the device
-                probe_result = AceDeviceDiscovery.probe_device(port, baud=self.baud)
+                probe_result = AceDeviceDiscovery.probe_ace_device(port, baud=self.baud, usb_location=usb_location)
                 if probe_result:
-                    # Generate device ID (USB location-based)
-                    device_id = self._generate_device_id(device_info)
+                    device_id = probe_result['device_id']
 
                     verified_devices.append({
                         'device_id': device_id,
                         'port': port,
-                        'usb_location': device_info.get('usb_location', ''),
-                        'firmware_version': probe_result.get('firmware_version', 'unknown'),
+                        'usb_location': usb_location or '',
+                        'firmware_version': probe_result.get('firmware', 'unknown'),
+                        'model': probe_result.get('model', 'ACE'),
                         'device_info': device_info,
                         'probe_result': probe_result
                     })
