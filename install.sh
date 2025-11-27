@@ -8,6 +8,7 @@ KLIPPER_HOME="${HOME}/klipper"
 KLIPPER_ENV="${HOME}/klippy-env"
 KLIPPER_CONFIG_HOME="${HOME}/printer_data/config"
 MOONRAKER_CONFIG_DIR="${HOME}/printer_data/config"
+MOONRAKER_HOME="${HOME}/moonraker"
 SRCDIR="$PWD"
 
 
@@ -16,6 +17,7 @@ if [ "$IS_MIPS" -eq 1 ]; then
     KLIPPER_ENV="/usr/share/klippy-env"
     KLIPPER_CONFIG_HOME="/usr/data/printer_data/config"
     MOONRAKER_CONFIG_DIR="/usr/data/printer_data/config"
+    MOONRAKER_HOME="/usr/share/moonraker"
 fi
 
 usage(){ echo "Usage: $0 [-u]" 1>&2; exit 1; }
@@ -52,13 +54,22 @@ check_folders()
         echo "[ERROR] Klipper configs not found in directory \"$MOONRAKER_CONFIG_DIR\". Exiting"
         exit 1
     fi
-    echo "Klipper installation found at $KLIPPER_CONFIG_HOME"
+    echo "Klipper config directory found at $KLIPPER_CONFIG_HOME"
 
     if [ ! -f "${MOONRAKER_CONFIG_DIR}/moonraker.conf" ]; then
         echo "[ERROR] Moonraker configuration not found in directory \"$MOONRAKER_CONFIG_DIR\". Exiting"
         exit 1
     fi
     echo "Moonraker configuration found at $MOONRAKER_CONFIG_DIR"
+
+    if [ ! -d "${MOONRAKER_HOME}/moonraker/components/" ]; then
+        echo "[WARNING] Moonraker components directory not found at \"${MOONRAKER_HOME}/moonraker/components/\""
+        echo "[WARNING] ACE Manager Moonraker component will not be installed"
+        MOONRAKER_INSTALL=0
+    else
+        echo "Moonraker installation found at $MOONRAKER_HOME"
+        MOONRAKER_INSTALL=1
+    fi
 }
 
 link_extension()
@@ -82,6 +93,35 @@ copy_config()
   fi
 }
 
+install_moonraker_component()
+{
+    if [ "$MOONRAKER_INSTALL" -eq 1 ]; then
+        echo -n "Installing ACE Manager Moonraker component... "
+        if [ -f "${SRCDIR}/moonraker/ace_manager.py" ]; then
+            ln -sf "${SRCDIR}/moonraker/ace_manager.py" "${MOONRAKER_HOME}/moonraker/components/ace_manager.py"
+            echo "[OK]"
+
+            # Check if [ace_manager] section exists in moonraker.conf
+            ace_section=$(grep -c '\[ace_manager\]' "${MOONRAKER_CONFIG_DIR}/moonraker.conf" || true)
+            if [ "$ace_section" -eq 0 ]; then
+                echo -n "Adding [ace_manager] to moonraker.conf... "
+                echo "" >> "${MOONRAKER_CONFIG_DIR}/moonraker.conf"
+                echo "# ACE Manager REST API component" >> "${MOONRAKER_CONFIG_DIR}/moonraker.conf"
+                echo "[ace_manager]" >> "${MOONRAKER_CONFIG_DIR}/moonraker.conf"
+                echo "" >> "${MOONRAKER_CONFIG_DIR}/moonraker.conf"
+                echo "[OK]"
+            else
+                echo "[ace_manager] section already exists in moonraker.conf [SKIPPED]"
+            fi
+        else
+            echo "[ERROR] ace_manager.py not found in ${SRCDIR}/moonraker/"
+            echo "[FAILED]"
+        fi
+    else
+        echo "Moonraker component installation skipped (Moonraker not found)"
+    fi
+}
+
 install_requirements()
 {
     echo -n "Install requirements... "
@@ -92,14 +132,30 @@ install_requirements()
 uninstall()
 {
     if [ -f "${KLIPPER_HOME}/klippy/extras/ace.py" ]; then
-        echo -n "Uninstalling... "
+        echo -n "Uninstalling Klipper extension... "
         rm -f "${KLIPPER_HOME}/klippy/extras/ace.py"
         echo "[OK]"
-        echo "You can now remove the [update_manager BunnyAce] section in your moonraker.conf and delete this directory. Also remove all led_effect configurations from your Klipper configuration."
     else
         echo "ace.py not found in \"${KLIPPER_HOME}/klippy/extras/\". Is it installed?"
-        echo "[FAILED]"
     fi
+
+    # Uninstall Moonraker component
+    if [ -f "${MOONRAKER_HOME}/moonraker/components/ace_manager.py" ]; then
+        echo -n "Uninstalling Moonraker component... "
+        rm -f "${MOONRAKER_HOME}/moonraker/components/ace_manager.py"
+        echo "[OK]"
+        echo "[INFO] Remember to remove the [ace_manager] section from moonraker.conf"
+    else
+        echo "ace_manager.py not found in Moonraker components"
+    fi
+
+    echo ""
+    echo "Uninstall complete!"
+    echo "You can now:"
+    echo "  - Remove the [update_manager BunnyACE] section from moonraker.conf"
+    echo "  - Remove the [ace_manager] section from moonraker.conf"
+    echo "  - Remove ACE configuration from printer.cfg"
+    echo "  - Delete this directory"
 }
 
 restart_moonraker()
@@ -178,7 +234,26 @@ stop_klipper
 if [ "$UNINSTALL" -ne 1 ]; then
     link_extension
     copy_config
+    install_moonraker_component
     add_updater
+
+    echo ""
+    echo "========================================="
+    echo "Installation Complete!"
+    echo "========================================="
+    echo ""
+    echo "Next steps:"
+    echo "1. Add ACE configuration to printer.cfg (see ace.cfg for example)"
+    echo "2. Restart Klipper and Moonraker"
+    echo "3. Test with: ACE_LIST_DEVICES"
+    echo ""
+    if [ "$MOONRAKER_INSTALL" -eq 1 ]; then
+        echo "ACE Manager REST API is available at:"
+        echo "  - GET  http://localhost:7125/server/ace/devices"
+        echo "  - GET  http://localhost:7125/server/ace/status"
+        echo "  - POST http://localhost:7125/server/ace/scan"
+        echo ""
+    fi
 else
     uninstall
 fi

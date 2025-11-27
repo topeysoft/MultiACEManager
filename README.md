@@ -10,7 +10,7 @@
 ![Anycubic ACE](https://img.shields.io/badge/Anycubic-ACE%20Pro-8A2BE2)
 
 <p>Driver for Anycubic Color Engine Pro (ACE) for Klipper 🐰🎨</p>
-<p>Control filament feed, tool change (up to 4 channels), ACE dryer, and workflows right from Klipper/G-code.</p>
+<p>Control filament feed, tool change (up to 16 channels with multi-ACE), ACE dryer, and workflows right from Klipper/G-code.</p>
 
 [Русская версия →](./README.ru.md)
 
@@ -25,6 +25,7 @@
 - [Update](#-update)
 - [Uninstall](#-uninstall)
 - [Quick Start](#-quick-start)
+- [Device Chaining](#-device-chaining)
 - [Configuration (acecfg)](#-configuration-acecfg)
 - [G-code Commands](#-g-code-commands)
 - [Sensors and Logic](#-sensors-and-logic)
@@ -36,7 +37,9 @@
 - [Authors and Contributors](#-authors-and-contributors)
 
 ## ✨ Features
-- Up to 4 feed lines (gates) and tool change via G-code 🔀
+- **Multi-ACE Support**: Use 2, 3, 4, or more ACE Pro devices for 8, 12, 16+ gates 🔀
+- **ACE Manager**: Unified interface across all ACE units with automatic routing
+- Up to 4 gates per ACE device
 - Feed Assist on ACE side
 - ACE Pro dryer control: start by temperature/time and stop ♨️
 - Gate mapping: color, material, recommended temperature 🎯
@@ -87,6 +90,89 @@ cd ~/BunnyACE
 3) Restart Klipper — the console will show a message about successful ACE connection (model and firmware).
 4) Test tool change: `T0` / `T1` / `T2` / `T3` (or `ACE_CHANGE_TOOL TOOL=0..3`).
 
+## 🔗 Multi-ACE Setup
+
+**IMPORTANT**: ACE Pro "daisy-chaining" is for **filament routing only**. Each ACE Pro is a separate USB device that must be configured individually.
+
+### How Multi-ACE Actually Works
+
+- **Physical**: ACE units are daisy-chained for filament path (ACE1 → ACE2 → ACE3...)
+- **USB**: Each ACE creates its own USB device (built-in USB hub)
+- **Communication**: Each ACE reports its own 4 slots independently
+- **BunnyACE Solution**: Use `[ace_manager]` to aggregate multiple ACEs into a unified system
+
+### Quick Setup (5 Minutes - 2 ACEs = 8 Gates)
+
+1. **Auto-detect and generate config**:
+   ```bash
+   cd ~/printer_data/config
+   python3 ~/BunnyACE/probe_ace_ports.py --generate-config
+   ```
+
+2. **Copy the output** to your `ace.cfg` or `printer.cfg`
+
+3. **Update sensor pins** (the two lines marked "Update this!")
+
+4. **Restart Klipper** and test with `ACE_GET_STATUS`
+
+**That's it!** Your 8-gate system is ready.
+
+### Configuration Methods
+
+#### Method 1: Simple Serial Ports (Recommended)
+```ini
+[ace_manager]
+serial_ports: /dev/ttyACM0, /dev/ttyACM1
+extruder_sensor_pin: ^EBBCan: PB9
+# All shared settings in one place
+```
+
+#### Method 2: Auto-Detection
+```ini
+[ace_manager]
+auto_detect: true
+extruder_sensor_pin: ^EBBCan: PB9
+# System finds ACE devices automatically
+```
+
+#### Method 3: Named Devices (Advanced)
+```ini
+[ace_manager]
+ace_devices: ace1, ace2
+
+[ace ace1]
+serial: /dev/ttyACM0
+# Individual ACE settings
+
+[ace ace2]
+serial: /dev/ttyACM1
+# Individual ACE settings
+```
+
+### Supported Configurations
+- **2 ACEs**: 8 gates (T0-T7)
+- **3 ACEs**: 12 gates (T0-T11)
+- **4 ACEs**: 16 gates (T0-T15)
+- **More**: No limit! Add as many as you want
+
+### Documentation
+
+- **[SIMPLE_CONFIG_GUIDE.md](./SIMPLE_CONFIG_GUIDE.md)** - Start here! 5-minute setup guide
+- **[MULTI_ACE_SETUP.md](./MULTI_ACE_SETUP.md)** - Detailed multi-ACE documentation
+- **[QUICKSTART_DUAL_ACE.md](./QUICKSTART_DUAL_ACE.md)** - 10-minute dual-ACE setup
+
+### Example Configs
+
+- **ace_manager_simple.cfg** - Recommended for most users
+- **ace_manager_example.cfg** - Named device method
+- **ace.cfg** - Single ACE example
+
+### Single ACE vs Multi-ACE
+
+**For single ACE (4 gates)**: Use `[include ace.cfg]` as before
+
+**For multiple ACEs (8+ gates)**: Use `[ace_manager]` configuration
+
 ## 🛠️ Configuration (ace.cfg)
 Main parameters (see full `ace.cfg` for macros):
 - serial: `/dev/serial/by-id/...` — ACE identifier
@@ -121,6 +207,7 @@ ACE adds commands available from Klipper console/macros.
 - `ACE_RETRACT INDEX=<0..3> LENGTH=<mm> [SPEED=<mm/s>]` — retract filament into ACE
 - `ACE_GATE_MAP GATE=<0..3> [COLOR=<hexRGB>] [TYPE=<PLA/ABS/...>] [TEMP=<°C>]` — set gate metadata
 - `ACE_ENDLESS_SPOOL ENABLE=<0|1>` — enable/disable endless spool
+- `ACE_GET_STATUS` — display detailed status including slot count, firmware info, and full response (useful for debugging chaining)
 - `ACE_DEBUG METHOD=<json_rpc_method> [PARAMS='{"k":"v"}']` — macro to test requests to ACE
 
 ## 🧲 Sensors and Logic

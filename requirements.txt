@@ -1,0 +1,11 @@
+# BunnyACE Requirements
+# Python dependencies for ACE Manager
+
+# Serial communication
+pyserial>=3.4
+
+# USB device enumeration (for auto-detection)
+# Already included with pyserial.tools.list_ports
+
+# No additional requirements needed for basic functionality
+# Klipper and Moonraker provide their own dependencies

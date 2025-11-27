@@ -1,0 +1,580 @@
+# ACE Manager - Phase 1: Auto-Discovery & Device Persistence
+
+## Overview
+Phase 1 implements zero-configuration auto-discovery and persistent device identification for ACE MMU systems, eliminating the need for manual serial port specification.
+
+## Architecture
+
+### 1. USB Device Enumeration
+
+#### Implementation Location
+`BunnyACE/extras/ace.py` - New class `AceDeviceDiscovery`
+
+```python
+class AceDeviceDiscovery:
+    """Handles auto-discovery and enumeration of ACE devices"""
+
+    ACE_VID = 0x28E9  # GDMicroelectronics vendor ID
+    ACE_PID = 0x018A  # ACE product ID
+    ACE_MANUFACTURER = "GDMicroelectronics"
+    ACE_PRODUCT_NAME = "ACE"
+
+    @staticmethod
+    def find_ace_devices():
+        """
+        Scan all USB serial ports and identify ACE devices
+        Returns: List of dicts with port info and device details
+        """
+        import serial.tools.list_ports
+
+        ace_devices = []
+        ports = serial.tools.list_ports.comports()
+
+        for port in ports:
+            # Method 1: VID/PID matching (most reliable)
+            if port.vid == AceDeviceDiscovery.ACE_VID:
+                ace_devices.append({
+                    'port': port.device,
+                    'hwid': port.hwid,
+                    'serial_number': port.serial_number,
+                    'manufacturer': port.manufacturer,
+                    'product': port.product,
+                    'vid': port.vid,
+                    'pid': port.pid,
+                    'location': port.location  # USB hub location for stable ordering
+                })
+            # Method 2: Manufacturer/Product string matching (fallback)
+            elif (port.manufacturer and ACE_MANUFACTURER in port.manufacturer.upper()) or \
+                 (port.product and ACE_PRODUCT_NAME in port.product.upper()):
+                ace_devices.append({
+                    'port': port.device,
+                    'hwid': port.hwid,
+                    'serial_number': port.serial_number,
+                    'manufacturer': port.manufacturer,
+                    'product': port.product,
+                    'vid': port.vid,
+                    'pid': port.pid,
+                    'location': port.location
+                })
+
+        # Sort by USB location for deterministic ordering
+        ace_devices.sort(key=lambda x: x.get('location', ''))
+
+        return ace_devices
+
+    @staticmethod
+    def probe_ace_device(port, baud=115200, timeout=2.0):
+        """
+        Connect to a port and verify it's an ACE device
+        Returns: Device info dict or None if not ACE
+        """
+        try:
+            ser = serial.Serial(
+                port=port,
+                baudrate=baud,
+                timeout=timeout,
+                write_timeout=timeout
+            )
+
+            # Send get_info request
+            request = {"id": 1, "method": "get_info"}
+            # Use ACE protocol to send request
+            response = AceDeviceDiscovery._send_ace_request(ser, request, timeout)
+
+            if response and 'result' in response:
+                result = response['result']
+                # Extract unique device identifier
+                device_id = AceDeviceDiscovery._generate_device_id(result)
+
+                return {
+                    'device_id': device_id,
+                    'model': result.get('model', 'Unknown'),
+                    'firmware': result.get('firmware', 'Unknown'),
+                    'serial_number': result.get('serial_number', None),
+                    'mac_address': result.get('mac_address', None),
+                    'num_gates': 4  # Default, can be detected from slots
+                }
+
+            ser.close()
+            return None
+
+        except Exception as e:
+            logging.warning(f"Failed to probe {port}: {e}")
+            return None
+
+    @staticmethod
+    def _generate_device_id(device_info):
+        """
+        Generate unique device ID from device info
+        Priority: MAC > Serial Number > Firmware+Model hash
+        """
+        # Best: MAC address (if available)
+        if 'mac_address' in device_info and device_info['mac_address']:
+            return f"mac_{device_info['mac_address']}"
+
+        # Good: Serial number
+        if 'serial_number' in device_info and device_info['serial_number']:
+            return f"sn_{device_info['serial_number']}"
+
+        # Fallback: Hash of firmware + model (not ideal, changes on firmware update)
+        import hashlib
+        unique_str = f"{device_info.get('model', '')}_{device_info.get('firmware', '')}"
+        hash_val = hashlib.md5(unique_str.encode()).hexdigest()[:8]
+        return f"fw_{hash_val}"
+```
+
+### 2. Device Persistence System
+
+#### File Structure
+```
+printer_data/config/
+├── ace.cfg                    # Main config (no serial ports needed!)
+├── ace_vars.cfg              # Existing variables file
+└── ace_device_map.cfg        # Auto-generated device mapping (NEW)
+```
+
+#### ace_device_map.cfg Format
+```ini
+# Auto-generated by ACE Manager - DO NOT EDIT MANUALLY
+# This file maps ACE device IDs to USB ports and gate offsets
+# It is automatically updated when devices are detected
+
+[ace_device_map]
+# Format: device_id = port, gate_offset, last_seen_timestamp
+# Device IDs are persistent across reboots even if USB ports change
+
+mac_001a2b3c4d5e = /dev/ttyACM0, 0, 1234567890
+mac_00aabbccddee = /dev/ttyACM1, 4, 1234567891
+sn_ACE12345 = /dev/ttyACM2, 8, 1234567892
+```
+
+#### Implementation
+```python
+class AceDeviceMapper:
+    """Manages persistent device ID to port mapping"""
+
+    def __init__(self, config_path):
+        self.config_path = config_path
+        self.device_map = {}  # device_id -> {port, gate_offset, last_seen}
+        self.load()
+
+    def load(self):
+        """Load device map from file"""
+        import configparser
+        import os
+
+        if not os.path.exists(self.config_path):
+            return
+
+        parser = configparser.ConfigParser()
+        parser.read(self.config_path)
+
+        if parser.has_section('ace_device_map'):
+            for device_id, value in parser.items('ace_device_map'):
+                if device_id.startswith('#'):
+                    continue
+                parts = [p.strip() for p in value.split(',')]
+                if len(parts) >= 2:
+                    self.device_map[device_id] = {
+                        'port': parts[0],
+                        'gate_offset': int(parts[1]) if len(parts) > 1 else 0,
+                        'last_seen': int(parts[2]) if len(parts) > 2 else 0
+                    }
+
+    def save(self):
+        """Save device map to file"""
+        import configparser
+        import time
+
+        parser = configparser.ConfigParser()
+        parser.add_section('ace_device_map')
+
+        # Add header comment
+        parser.set('ace_device_map', '# Auto-generated by ACE Manager - DO NOT EDIT MANUALLY', None)
+
+        for device_id, info in self.device_map.items():
+            value = f"{info['port']}, {info['gate_offset']}, {int(time.time())}"
+            parser.set('ace_device_map', device_id, value)
+
+        with open(self.config_path, 'w') as f:
+            parser.write(f)
+
+    def update_device(self, device_id, port, gate_offset=None):
+        """Update or add a device mapping"""
+        import time
+
+        if device_id not in self.device_map:
+            self.device_map[device_id] = {
+                'gate_offset': gate_offset if gate_offset is not None else len(self.device_map) * 4
+            }
+
+        self.device_map[device_id]['port'] = port
+        self.device_map[device_id]['last_seen'] = int(time.time())
+
+    def get_port_for_device(self, device_id):
+        """Get the last known port for a device ID"""
+        return self.device_map.get(device_id, {}).get('port')
+
+    def find_device_by_port(self, port):
+        """Find device ID by current port"""
+        for device_id, info in self.device_map.items():
+            if info['port'] == port:
+                return device_id
+        return None
+```
+
+### 3. Enhanced AceManager with Auto-Detection
+
+#### Modified AceManager.__init__()
+```python
+class AceManager:
+    def __init__(self, config):
+        self.printer = config.get_printer()
+        self.config = config
+
+        # Initialize device mapper
+        config_dir = os.path.dirname(config.fileconfig.filename)
+        map_file = os.path.join(config_dir, 'ace_device_map.cfg')
+        self.device_mapper = AceDeviceMapper(map_file)
+
+        # Configuration options
+        auto_detect = config.getboolean('auto_detect', True)  # Default to TRUE
+        serial_ports_str = config.get('serial_ports', None)
+
+        if serial_ports_str:
+            # Manual mode: use specified ports
+            self._setup_from_serial_ports(config, serial_ports_str)
+        elif auto_detect:
+            # Auto mode: discover and match to known devices
+            self._setup_auto_detect(config)
+        else:
+            config.error("ACE Manager requires either serial_ports or auto_detect=true")
+
+        # Register event handlers
+        self.printer.register_event_handler('klippy:ready', self._handle_ready)
+        self.printer.register_event_handler('klippy:connect', self._handle_connect)
+```
+
+#### Auto-Detection Flow
+```python
+def _setup_auto_detect(self, config):
+    """Auto-detect ACE devices and create instances"""
+    logging.info("ACE Manager: Auto-detecting ACE devices...")
+
+    # Step 1: Scan USB ports for ACE devices
+    discovered_devices = AceDeviceDiscovery.find_ace_devices()
+
+    if not discovered_devices:
+        logging.warning("ACE Manager: No ACE devices found via USB enumeration")
+        # Don't fail - devices might be connected later
+        return
+
+    logging.info(f"ACE Manager: Found {len(discovered_devices)} potential ACE devices")
+
+    # Step 2: Probe each device to get device ID and verify it's ACE
+    verified_devices = []
+    for dev_info in discovered_devices:
+        port = dev_info['port']
+        logging.info(f"ACE Manager: Probing {port}...")
+
+        ace_info = AceDeviceDiscovery.probe_ace_device(port)
+        if ace_info:
+            verified_devices.append({
+                'port': port,
+                'device_id': ace_info['device_id'],
+                'model': ace_info['model'],
+                'firmware': ace_info['firmware'],
+                'usb_location': dev_info['location']
+            })
+            logging.info(f"  ✓ ACE Device: {ace_info['model']} (ID: {ace_info['device_id']})")
+        else:
+            logging.info(f"  ✗ Not an ACE device")
+
+    if not verified_devices:
+        logging.warning("ACE Manager: No verified ACE devices found")
+        return
+
+    # Step 3: Match with known devices from device map
+    # Try to preserve gate offsets for known devices
+    known_devices = {}
+    for dev in verified_devices:
+        device_id = dev['device_id']
+        if device_id in self.device_mapper.device_map:
+            # Known device - use saved gate offset
+            known_devices[device_id] = {
+                **dev,
+                'gate_offset': self.device_mapper.device_map[device_id]['gate_offset']
+            }
+        else:
+            # New device - assign next available offset
+            next_offset = len(known_devices) * 4
+            known_devices[device_id] = {
+                **dev,
+                'gate_offset': next_offset
+            }
+
+        # Update device map
+        self.device_mapper.update_device(
+            device_id=device_id,
+            port=dev['port'],
+            gate_offset=known_devices[device_id]['gate_offset']
+        )
+
+    # Save updated device map
+    self.device_mapper.save()
+
+    # Step 4: Create BunnyAce instances
+    # Sort by gate offset to ensure correct order
+    sorted_devices = sorted(known_devices.values(), key=lambda x: x['gate_offset'])
+
+    for dev in sorted_devices:
+        self._create_ace_instance(config, dev)
+
+    logging.info(f"ACE Manager: Configured {len(sorted_devices)} ACE devices with {len(sorted_devices) * 4} total gates")
+```
+
+### 4. Reconnection Logic
+
+#### Device Reconnection on Boot
+```python
+def _handle_connect(self):
+    """Handle Klipper connection - attempt to reconnect to ACE devices"""
+    logging.info("ACE Manager: Klipper connected, reconnecting to ACE devices...")
+
+    # Re-scan USB to find current ports for known device IDs
+    discovered = AceDeviceDiscovery.find_ace_devices()
+
+    for ace_device in self.ace_devices:
+        device_id = ace_device.get('device_id')
+        if not device_id:
+            continue
+
+        # Try to find this device in current USB enumeration
+        current_port = None
+        for dev_info in discovered:
+            port = dev_info['port']
+            ace_info = AceDeviceDiscovery.probe_ace_device(port)
+            if ace_info and ace_info['device_id'] == device_id:
+                current_port = port
+                break
+
+        if current_port:
+            # Update port if changed
+            if current_port != ace_device['port']:
+                logging.info(f"ACE Manager: Device {device_id} moved from {ace_device['port']} to {current_port}")
+                ace_device['port'] = current_port
+                ace_device['instance'].serial_id = current_port
+                self.device_mapper.update_device(device_id, current_port)
+                self.device_mapper.save()
+
+            # Trigger reconnection
+            ace_device['instance']._handle_ready()
+        else:
+            logging.warning(f"ACE Manager: Device {device_id} not found, will retry...")
+```
+
+### 5. Connection Loss Handling
+
+#### Enhanced BunnyAce._reader() Error Handling
+```python
+def _reader(self, eventtime):
+    """Reader with enhanced error handling and reconnection"""
+    try:
+        # Existing read logic...
+        pass
+
+    except serial.SerialException as e:
+        self.log_error(f"ACE communication error: {e}")
+
+        # Check if device still exists
+        if not os.path.exists(self.serial_id):
+            self.log_warning(f"ACE device {self.serial_id} disconnected")
+            self.log_warning("Waiting for device to reconnect...")
+
+            # Enter reconnection mode
+            self._serial_disconnect()
+            self._connection_retry_count = 0
+            self.connect_timer = self.reactor.register_timer(
+                self._reconnect_with_backoff,
+                self.reactor.NOW
+            )
+            return self.reactor.NEVER
+
+        # Device exists but communication failed - try to recover
+        self._serial_disconnect()
+        self.connect_timer = self.reactor.register_timer(self._connect, self.reactor.NOW)
+        return self.reactor.NEVER
+
+def _reconnect_with_backoff(self, eventtime):
+    """Reconnect with exponential backoff"""
+    max_retries = 10
+    base_delay = 1.0
+    max_delay = 30.0
+
+    if self._connection_retry_count >= max_retries:
+        self.log_error(f"Failed to reconnect to ACE after {max_retries} attempts")
+        self.log_error("Please check device connection and restart Klipper")
+        return self.reactor.NEVER
+
+    # Try to reconnect
+    try:
+        result = self._connect(eventtime)
+        if result == self.reactor.NEVER:
+            # Success
+            self._connection_retry_count = 0
+            return self.reactor.NEVER
+    except Exception as e:
+        logging.warning(f"Reconnection attempt {self._connection_retry_count + 1} failed: {e}")
+
+    # Calculate backoff delay
+    self._connection_retry_count += 1
+    delay = min(base_delay * (2 ** self._connection_retry_count), max_delay)
+
+    logging.info(f"Retrying connection in {delay}s...")
+    return eventtime + delay
+```
+
+### 6. Configuration Changes
+
+#### Updated ace.cfg
+```ini
+[ace]
+# AUTO-DETECTION (Recommended)
+# Automatically finds and configures all connected ACE devices
+# No need to specify serial ports!
+auto_detect: true
+
+# MANUAL MODE (Optional)
+# Only use if you need to specify exact ports
+# Comment out auto_detect and uncomment serial_ports:
+# auto_detect: false
+# serial_ports: /dev/serial/by-id/usb-ANYCUBIC_ACE_1-if00, /dev/serial/by-id/usb-ANYCUBIC_ACE_2-if00
+
+# Common configuration (applies to all ACE devices)
+baud: 115200
+extruder_sensor_pin: ^EBBCan:PB9
+toolhead_sensor_pin: EBBCan:PB8
+# ... rest of config
+```
+
+## User Experience Improvements
+
+### 1. Boot Messages
+```
+Klipper starting...
+ACE Manager: Auto-detecting ACE devices...
+ACE Manager: Scanning USB ports...
+  ✓ Found ACE PRO at /dev/ttyACM0
+  ✓ Found ACE PRO at /dev/ttyACM1
+ACE Manager: Verifying devices...
+  ✓ Device 1: ACE PRO v2.1 (ID: mac_001a2b3c)
+  ✓ Device 2: ACE PRO v2.1 (ID: mac_00aabbcc)
+ACE Manager: Configured 2 devices, 8 total gates (0-7)
+ACE Manager: Device map saved to ace_device_map.cfg
+```
+
+### 2. Error Messages with Actionable Guidance
+```python
+def _log_connection_error(self, error_type):
+    """Log connection errors with helpful guidance"""
+    messages = {
+        'no_devices_found': [
+            "No ACE devices detected.",
+            "Troubleshooting steps:",
+            "  1. Check USB connections",
+            "  2. Run: ls /dev/ttyACM* to see available ports",
+            "  3. Check USB cable quality",
+            "  4. Try a different USB port",
+            "  5. Power cycle the ACE device"
+        ],
+        'device_disappeared': [
+            f"ACE device {self.serial_id} disconnected during operation.",
+            "The print has been paused.",
+            "Reconnect the device and resume when ready."
+        ],
+        'multiple_devices_different_firmware': [
+            "Warning: ACE devices have different firmware versions:",
+            "  Device 1: v2.0",
+            "  Device 2: v2.1",
+            "Consider updating all devices to the same version for best compatibility."
+        ]
+    }
+
+    for line in messages.get(error_type, ["Unknown error"]):
+        self.log_warning(line)
+```
+
+## Testing Procedures
+
+### 1. Auto-Detection Test
+```bash
+# Test 1: Fresh installation (no device map)
+# Expected: Detects all devices, creates device map, assigns gates 0-7
+
+# Test 2: Reboot with existing device map
+# Expected: Loads known devices, preserves gate assignments
+
+# Test 3: USB ports changed
+# Expected: Finds devices by ID, updates ports, maintains gate assignments
+
+# Test 4: One device disconnected
+# Expected: Continues with remaining devices, logs warning
+
+# Test 5: New device added
+# Expected: Detects new device, assigns gates 8-11, updates device map
+```
+
+### 2. Reconnection Test
+```bash
+# Test 1: Disconnect during idle
+# Expected: Logs warning, attempts reconnection
+
+# Test 2: Disconnect during print
+# Expected: Pauses print, attempts reconnection
+
+# Test 3: Connect new device while running
+# Expected: Detects device, logs message, requires restart to activate
+```
+
+## Migration Guide
+
+### From Manual Serial Ports to Auto-Detect
+```bash
+# Old config:
+# serial_ports: /dev/ttyACM0, /dev/ttyACM1
+
+# New config:
+# auto_detect: true
+# (That's it!)
+
+# Device map will be auto-generated on first boot
+# Gate assignments will be preserved based on USB port order
+```
+
+## Performance Considerations
+
+1. **Boot Time**: USB enumeration adds ~1-2 seconds to boot time
+2. **Memory**: Device map file is <1KB
+3. **CPU**: Negligible - probing happens once at boot
+4. **Network**: No network access required
+
+## Security Considerations
+
+1. **Device Verification**: Always probe device before creating instance
+2. **File Permissions**: Device map file is user-writable
+3. **USB Access**: Requires same permissions as current serial access
+4. **No Network**: No external network access required
+
+## Dependencies
+
+- **Python Modules**: `pyserial` (already required)
+- **System**: No new system dependencies
+- **Klipper**: Compatible with Klipper v0.11.0+
+
+## Future Enhancements (Phase 2/3)
+
+1. Hot-plug detection using udev events
+2. Web UI for device management
+3. Firmware version checking
+4. Health monitoring
+5. Device diagnostics tool

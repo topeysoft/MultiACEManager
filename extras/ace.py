@@ -1,6 +1,45 @@
-import serial, threading, time, logging, json, struct, queue, traceback, re
+import serial, threading, time, logging, json, struct, queue, traceback, re, os, subprocess
 from serial import SerialException
 import serial.tools.list_ports
+from typing import Optional, Dict, List, Callable, Any, Tuple
+
+# Protocol Constants
+PROTOCOL_HEAD_BYTES = bytes([0xFF, 0xAA])
+PROTOCOL_TAIL_BYTE = 0xFE
+PROTOCOL_MIN_PACKET_SIZE = 7
+CRC_INIT_VALUE = 0xFFFF
+
+# Timing Constants
+DEFAULT_EVENT_DELAY = 0.1
+READY_WAIT_DELAY = 2.0
+CONNECT_RETRY_DELAY = 1.0
+READER_POLL_INTERVAL = 0.2
+WRITER_POLL_INTERVAL = 0.5
+SENSOR_POLL_INTERVAL = 0.1
+REQUEST_TIMEOUT = 2.0
+FEED_ASSIST_DELAY = 0.7
+FEED_ASSIST_DISABLE_DELAY = 0.3
+
+# ACE Device Constants
+DEFAULT_NUM_GATES = 4
+GATES_PER_ACE = 4
+DEFAULT_BAUD_RATE = 115200
+DEFAULT_MAX_DRYER_TEMP = 55
+DEFAULT_FEED_SPEED = 50
+DEFAULT_RETRACT_SPEED = 50
+DEFAULT_EXTRUDER_SPEED = 10
+DEFAULT_TOOLHEAD_HOMING_SPEED = 10
+DEFAULT_TOOLCHANGE_RETRACT_LENGTH = 100
+DEFAULT_TOOLCHANGE_FEED_LENGTH = 100
+DEFAULT_TOOLHEAD_HOMING_MAX = 100
+
+# Request ID bounds
+MAX_REQUEST_ID = 300000
+
+# Default colors and materials
+DEFAULT_COLOR = 'FFFFFF'
+DEFAULT_MATERIAL = ''
+DEFAULT_TEMP = 230
 
 
 class MmuRunoutHelper:
@@ -26,12 +65,24 @@ class MmuRunoutHelper:
 
         # Replace previous runout_helper mux commands with ours
         prev = self.gcode.mux_commands.get("QUERY_FILAMENT_SENSOR")
-        _, prev_values = prev
-        prev_values[self.name] = self.cmd_QUERY_FILAMENT_SENSOR
+        if prev is not None:
+            _, prev_values = prev
+            prev_values[self.name] = self.cmd_QUERY_FILAMENT_SENSOR
+        else:
+            # First sensor - register the mux command
+            self.gcode.register_mux_command("QUERY_FILAMENT_SENSOR", "SENSOR", self.name,
+                                           self.cmd_QUERY_FILAMENT_SENSOR,
+                                           desc=self.cmd_QUERY_FILAMENT_SENSOR_help)
 
         prev = self.gcode.mux_commands.get("SET_FILAMENT_SENSOR")
-        _, prev_values = prev
-        prev_values[self.name] = self.cmd_SET_FILAMENT_SENSOR
+        if prev is not None:
+            _, prev_values = prev
+            prev_values[self.name] = self.cmd_SET_FILAMENT_SENSOR
+        else:
+            # First sensor - register the mux command
+            self.gcode.register_mux_command("SET_FILAMENT_SENSOR", "SENSOR", self.name,
+                                           self.cmd_SET_FILAMENT_SENSOR,
+                                           desc=self.cmd_SET_FILAMENT_SENSOR_help)
 
     def _handle_ready(self):
         self.min_event_systime = self.reactor.monotonic() + 2.  # Time to wait before first events are processed
@@ -130,6 +181,220 @@ class MmuRunoutHelper:
 class AceException(Exception):
     pass
 
+
+class AceDeviceDiscovery:
+    """Handles auto-discovery and enumeration of ACE devices"""
+
+    ACE_VID = 0x28E9  # GDMicroelectronics vendor ID
+    ACE_PID = 0x018A  # ACE product ID
+    ACE_MANUFACTURER = "GDMicroelectronics"
+    ACE_PRODUCT_NAME = "ACE"
+
+    @staticmethod
+    def find_ace_devices():
+        """
+        Scan all USB serial ports and identify ACE devices
+        Returns: List of dicts with port info and device details
+        """
+        ace_devices = []
+        ports = serial.tools.list_ports.comports()
+
+        for port in ports:
+            # Method 1: VID/PID matching (most reliable)
+            if port.vid == AceDeviceDiscovery.ACE_VID:
+                ace_devices.append({
+                    'port': port.device,
+                    'hwid': port.hwid,
+                    'serial_number': port.serial_number,
+                    'manufacturer': port.manufacturer,
+                    'product': port.product,
+                    'vid': port.vid,
+                    'pid': port.pid,
+                    'location': port.location  # USB hub location for stable ordering
+                })
+            # Method 2: Manufacturer/Product string matching (fallback)
+            elif (port.manufacturer and AceDeviceDiscovery.ACE_MANUFACTURER.upper() in str(port.manufacturer).upper()) or \
+                 (port.product and AceDeviceDiscovery.ACE_PRODUCT_NAME.upper() in str(port.product).upper()):
+                ace_devices.append({
+                    'port': port.device,
+                    'hwid': port.hwid,
+                    'serial_number': port.serial_number,
+                    'manufacturer': port.manufacturer,
+                    'product': port.product,
+                    'vid': port.vid,
+                    'pid': port.pid,
+                    'location': port.location
+                })
+
+        # Sort by USB location for deterministic ordering
+        ace_devices.sort(key=lambda x: x.get('location', '') or '')
+
+        return ace_devices
+
+    @staticmethod
+    def probe_ace_device(port, baud=115200, timeout=2.0):
+        """
+        Connect to a port and verify it's an ACE device
+        Returns: Device info dict or None if not ACE
+        """
+        try:
+            ser = serial.Serial(
+                port=port,
+                baudrate=baud,
+                timeout=timeout,
+                write_timeout=timeout
+            )
+
+            # Send get_info request using ACE protocol
+            request = {"id": 1, "method": "get_info"}
+
+            # Build protocol packet
+            payload = json.dumps(request).encode('utf-8')
+            data = PROTOCOL_HEAD_BYTES
+            data += struct.pack('@H', len(payload))
+            data += payload
+
+            # Calculate CRC
+            crc_value = CRC_INIT_VALUE
+            for byte in payload:
+                byte_data = byte
+                byte_data ^= crc_value & 0xff
+                byte_data ^= (byte_data & 0x0f) << 4
+                crc_value = ((byte_data << 8) | (crc_value >> 8)) ^ (byte_data >> 4) ^ (byte_data << 3)
+
+            data += struct.pack('@H', crc_value)
+            data += bytes([PROTOCOL_TAIL_BYTE])
+
+            ser.write(data)
+            time.sleep(0.5)  # Wait for response
+
+            # Try to read response
+            if ser.in_waiting > 0:
+                response_data = ser.read(ser.in_waiting)
+
+                # Parse response
+                if len(response_data) >= PROTOCOL_MIN_PACKET_SIZE and response_data[0:2] == PROTOCOL_HEAD_BYTES:
+                    payload_len = struct.unpack('<H', response_data[2:4])[0]
+                    if len(response_data) >= 4 + payload_len:
+                        response_payload = response_data[4:4 + payload_len]
+
+                        try:
+                            response_json = json.loads(response_payload.decode('utf-8'))
+                            if 'result' in response_json:
+                                result = response_json['result']
+                                device_id = AceDeviceDiscovery._generate_device_id(result)
+
+                                ser.close()
+                                return {
+                                    'device_id': device_id,
+                                    'model': result.get('model', 'Unknown'),
+                                    'firmware': result.get('firmware', 'Unknown'),
+                                    'serial_number': result.get('serial_number', None),
+                                    'mac_address': result.get('mac_address', None),
+                                    'num_gates': 4  # Default, can be detected from slots
+                                }
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            pass
+
+            ser.close()
+            return None
+
+        except Exception as e:
+            logging.warning(f"Failed to probe {port}: {e}")
+            return None
+
+    @staticmethod
+    def _generate_device_id(device_info):
+        """
+        Generate unique device ID from device info
+        Priority: MAC > Serial Number > Firmware+Model hash
+        """
+        import hashlib
+
+        # Best: MAC address (if available)
+        if 'mac_address' in device_info and device_info['mac_address']:
+            return f"mac_{device_info['mac_address']}"
+
+        # Good: Serial number
+        if 'serial_number' in device_info and device_info['serial_number']:
+            return f"sn_{device_info['serial_number']}"
+
+        # Fallback: Hash of firmware + model (not ideal, changes on firmware update)
+        unique_str = f"{device_info.get('model', '')}_{device_info.get('firmware', '')}"
+        hash_val = hashlib.md5(unique_str.encode()).hexdigest()[:8]
+        return f"fw_{hash_val}"
+
+
+class AceDeviceMapper:
+    """Manages persistent device ID to port mapping"""
+
+    def __init__(self, config_path):
+        self.config_path = config_path
+        self.device_map = {}  # device_id -> {port, gate_offset, last_seen}
+        self.load()
+
+    def load(self):
+        """Load device map from file"""
+        import configparser
+
+        if not os.path.exists(self.config_path):
+            return
+
+        parser = configparser.ConfigParser()
+        parser.read(self.config_path)
+
+        if parser.has_section('ace_device_map'):
+            for device_id, value in parser.items('ace_device_map'):
+                if device_id.startswith('#'):
+                    continue
+                parts = [p.strip() for p in value.split(',')]
+                if len(parts) >= 2:
+                    self.device_map[device_id] = {
+                        'port': parts[0],
+                        'gate_offset': int(parts[1]) if len(parts) > 1 else 0,
+                        'last_seen': int(parts[2]) if len(parts) > 2 else 0
+                    }
+
+    def save(self):
+        """Save device map to file"""
+        import configparser
+
+        parser = configparser.ConfigParser()
+        parser.add_section('ace_device_map')
+
+        for device_id, info in sorted(self.device_map.items()):
+            value = f"{info['port']}, {info['gate_offset']}, {int(time.time())}"
+            parser.set('ace_device_map', device_id, value)
+
+        # Write with header comment
+        with open(self.config_path, 'w') as f:
+            f.write('# Auto-generated by ACE Manager - DO NOT EDIT MANUALLY\n')
+            f.write('# This file maps ACE device IDs to USB ports and gate offsets\n')
+            f.write('# It is automatically updated when devices are detected\n\n')
+            parser.write(f)
+
+    def update_device(self, device_id, port, gate_offset=None):
+        """Update or add a device mapping"""
+        if device_id not in self.device_map:
+            self.device_map[device_id] = {
+                'gate_offset': gate_offset if gate_offset is not None else len(self.device_map) * 4
+            }
+
+        self.device_map[device_id]['port'] = port
+        self.device_map[device_id]['last_seen'] = int(time.time())
+
+    def get_port_for_device(self, device_id):
+        """Get the last known port for a device ID"""
+        return self.device_map.get(device_id, {}).get('port')
+
+    def find_device_by_port(self, port):
+        """Find device ID by current port"""
+        for device_id, info in self.device_map.items():
+            if info['port'] == port:
+                return device_id
+        return None
+
+
 class BunnyAce:
     VARS_ACE_REVISION = 'ace__revision'
 
@@ -140,7 +405,9 @@ class BunnyAce:
         self.reactor = self.printer.get_reactor()
         self.gcode = self.printer.lookup_object('gcode')
         self._name = config.get_name()
-        self.lock = False
+        self._lock = threading.Lock()
+        self._request_in_flight = False
+        self._pending_request_id: Optional[int] = None
         self.send_time = None
         self.read_buffer = bytearray()
         if self._name.startswith('ace '):
@@ -157,6 +424,10 @@ class BunnyAce:
 
         self.serial_id = config.get('serial', '/dev/ttyACM0')
         self.baud = config.getint('baud', 115200)
+
+        # Gate offset for multi-ACE setups (e.g., second ACE has offset=4 for gates 4-7)
+        self.gate_offset = config.getint('gate_offset', 0)
+
         extruder_sensor_pin = config.get('extruder_sensor_pin')
         toolhead_sensor_pin = config.get('toolhead_sensor_pin', None)
         self.feed_speed = config.getint('feed_speed', 50)
@@ -167,8 +438,8 @@ class BunnyAce:
         self.toolhead_homing_speed = config.getint('toolhead_homing_speed', 10)
         self.extruder_move_speed = config.getint('extruder_move_speed', 10)
         self.toolhead_sensor_to_nozzle_length = config.getint('toolhead_sensor_to_nozzle', 0)
-        self.poop_macros = config.get('poop_macros')
-        self.cut_macros = config.get('cut_macros')
+        self.poop_macros = config.get('poop_macros', '_POOP')
+        self.cut_macros = config.get('cut_macros', '_CUT_TIP')
 
         # self.extruder_to_blade_length = config.getint('extruder_to_blade', None)
 
@@ -177,10 +448,13 @@ class BunnyAce:
         self._callback_map = {}
         self._feed_assist_index = -1
         self._request_id = 0
+        self._connection_retry_count = 0
         self.endstops = {}
 
         # Default data to prevent exceptions
-        self.gate_status = ['empty', 'empty', 'empty', 'empty']
+        # num_gates will be dynamically detected from ACE firmware response
+        self.num_gates = 4  # Minimum default, will be updated from get_status
+        self.gate_status = ['empty'] * self.num_gates
         self._info = {
             'status': 'ready',
             'dryer_status': {
@@ -194,37 +468,17 @@ class BunnyAce:
             'fan_speed': 7000,
             'feed_assist_count': 0,
             'cont_assist_time': 0.0,
-            'slots': [
-                {
-                    'index': 0,
-                    'status': 'empty',
-                    'sku': '',
-                    'type': '',
-                    'color': [0, 0, 0]
-                },
-                {
-                    'index': 1,
-                    'status': 'empty',
-                    'sku': '',
-                    'type': '',
-                    'color': [0, 0, 0]
-                },
-                {
-                    'index': 2,
-                    'status': 'empty',
-                    'sku': '',
-                    'type': '',
-                    'color': [0, 0, 0]
-                },
-                {
-                    'index': 3,
-                    'status': 'empty',
-                    'sku': '',
-                    'type': '',
-                    'color': [0, 0, 0]
-                }
-            ]
+            'slots': []  # Will be populated dynamically from get_status
         }
+        # Initialize with minimum 4 slots for backward compatibility
+        for i in range(self.num_gates):
+            self._info['slots'].append({
+                'index': i,
+                'status': 'empty',
+                'sku': '',
+                'type': '',
+                'color': [0, 0, 0]
+            })
         self._create_mmu_sensor(config, extruder_sensor_pin, "extruder_sensor", self.extruder_sensor_handler)
         if toolhead_sensor_pin is not None and len(toolhead_sensor_pin) >= 2:
             self._create_mmu_sensor(config, toolhead_sensor_pin, "toolhead_sensor")
@@ -233,37 +487,46 @@ class BunnyAce:
         self.printer.register_event_handler('klippy:disconnect', self._handle_disconnect)
         # self.printer.register_event_handler('klippy:shutdown', self._handle_disconnect)
 
-        self.gcode.register_command(
-            'ACE_DEBUG', self.cmd_ACE_DEBUG,
-            desc='self.cmd_ACE_DEBUG_help')
-        self.gcode.register_command(
-            'ACE_START_DRYING', self.cmd_ACE_START_DRYING,
-            desc=self.cmd_ACE_START_DRYING_help)
-        self.gcode.register_command(
-            'ACE_STOP_DRYING', self.cmd_ACE_STOP_DRYING,
-            desc=self.cmd_ACE_STOP_DRYING_help)
-        self.gcode.register_command(
-            'ACE_ENABLE_FEED_ASSIST', self.cmd_ACE_ENABLE_FEED_ASSIST,
-            desc=self.cmd_ACE_ENABLE_FEED_ASSIST_help)
-        self.gcode.register_command(
-            'ACE_DISABLE_FEED_ASSIST', self.cmd_ACE_DISABLE_FEED_ASSIST,
-            desc=self.cmd_ACE_DISABLE_FEED_ASSIST_help)
-        self.gcode.register_command(
-            'ACE_FEED', self.cmd_ACE_FEED,
-            desc=self.cmd_ACE_FEED_help)
-        self.gcode.register_command(
-            'ACE_RETRACT', self.cmd_ACE_RETRACT,
-            desc=self.cmd_ACE_RETRACT_help)
-        self.gcode.register_command(
-            'ACE_CHANGE_TOOL', self.cmd_ACE_CHANGE_TOOL,
-            desc=self.cmd_ACE_CHANGE_TOOL_help)
-        self.gcode.register_command(
-            'ACE_GATE_MAP', self.cmd_ACE_GATE_MAP,
-            desc=self.cmd_ACE_GATE_MAP_help)
-        self.gcode.register_command(
-            'ACE_ENDLESS_SPOOL', self.cmd_ACE_ENDLESS_SPOOL,
-            desc=self.cmd_ACE_ENDLESS_SPOOL_help
-        )
+        # Only register global commands if this is a standalone ACE (not managed)
+        # Managed ACEs will have their commands registered by AceManager
+        self.is_managed = self._name != 'ace'  # If name is not default, it's managed
+
+        if not self.is_managed:
+            self.gcode.register_command(
+                'ACE_DEBUG', self.cmd_ACE_DEBUG,
+                desc='self.cmd_ACE_DEBUG_help')
+            self.gcode.register_command(
+                'ACE_START_DRYING', self.cmd_ACE_START_DRYING,
+                desc=self.cmd_ACE_START_DRYING_help)
+            self.gcode.register_command(
+                'ACE_STOP_DRYING', self.cmd_ACE_STOP_DRYING,
+                desc=self.cmd_ACE_STOP_DRYING_help)
+            self.gcode.register_command(
+                'ACE_ENABLE_FEED_ASSIST', self.cmd_ACE_ENABLE_FEED_ASSIST,
+                desc=self.cmd_ACE_ENABLE_FEED_ASSIST_help)
+            self.gcode.register_command(
+                'ACE_DISABLE_FEED_ASSIST', self.cmd_ACE_DISABLE_FEED_ASSIST,
+                desc=self.cmd_ACE_DISABLE_FEED_ASSIST_help)
+            self.gcode.register_command(
+                'ACE_FEED', self.cmd_ACE_FEED,
+                desc=self.cmd_ACE_FEED_help)
+            self.gcode.register_command(
+                'ACE_RETRACT', self.cmd_ACE_RETRACT,
+                desc=self.cmd_ACE_RETRACT_help)
+            self.gcode.register_command(
+                'ACE_CHANGE_TOOL', self.cmd_ACE_CHANGE_TOOL,
+                desc=self.cmd_ACE_CHANGE_TOOL_help)
+            self.gcode.register_command(
+                'ACE_GATE_MAP', self.cmd_ACE_GATE_MAP,
+                desc=self.cmd_ACE_GATE_MAP_help)
+            self.gcode.register_command(
+                'ACE_ENDLESS_SPOOL', self.cmd_ACE_ENDLESS_SPOOL,
+                desc=self.cmd_ACE_ENDLESS_SPOOL_help
+            )
+            self.gcode.register_command(
+                'ACE_GET_STATUS', self.cmd_ACE_GET_STATUS,
+                desc=self.cmd_ACE_GET_STATUS_help
+            )
 
     def _handle_ready(self):
         self.toolhead = self.printer.lookup_object('toolhead')
@@ -326,28 +589,95 @@ class BunnyAce:
 
 
     def _get_next_request_id(self) -> int:
+        """Get next sequential request ID with wraparound"""
         self._request_id += 1
-        if self._request_id >= 300000:
+        if self._request_id >= MAX_REQUEST_ID:
             self._request_id = 0
         return self._request_id
 
-    def _serial_disconnect(self):
+    def _validate_gate_index(self, index: int, param_name: str = "index") -> None:
+        """Validate gate index is within valid range"""
+        if index < 0 or index >= self.num_gates:
+            raise AceException(f"Invalid {param_name}: {index} (valid range: 0-{self.num_gates-1})")
 
-        if self._serial is not None and self._serial.is_open:
-            self._serial.close()
+    def _validate_positive(self, value: int, param_name: str) -> None:
+        """Validate value is positive"""
+        if value <= 0:
+            raise AceException(f"Invalid {param_name}: {value} (must be > 0)")
+
+    def _validate_temperature(self, temp: int, max_temp: int) -> None:
+        """Validate temperature is within safe range"""
+        if temp <= 0 or temp > max_temp:
+            raise AceException(f"Invalid temperature: {temp} (valid range: 1-{max_temp})")
+
+    def _create_standard_callback(self, success_msg: Optional[str] = None, error_handler: Optional[Callable] = None):
+        """Create a standard callback for ACE requests"""
+        def callback(self, response):
+            if 'code' in response and response['code'] != 0:
+                error_msg = response.get('msg', 'Unknown error')
+                self.log_error(f"ACE Error: {error_msg}")
+                if error_handler:
+                    error_handler(response)
+                return
+
+            if success_msg:
+                self.gcode.respond_info(success_msg)
+
+            logging.debug(f"ACE request successful: {response.get('method', 'unknown')}")
+
+        return callback
+
+    def _serial_disconnect(self) -> None:
+        """Safely disconnect from serial port and cleanup timers"""
+        try:
+            if self._serial is not None and self._serial.is_open:
+                self._serial.close()
+                logging.info(f"ACE: Closed connection to {self.serial_id}")
+        except Exception as e:
+            logging.error(f"ACE: Error closing serial port: {e}")
+        finally:
             self._connected = False
 
-        self.reactor.unregister_timer(self.reader_timer)
-        self.reactor.unregister_timer(self.writer_timer)
+        try:
+            if hasattr(self, 'reader_timer'):
+                self.reactor.unregister_timer(self.reader_timer)
+            if hasattr(self, 'writer_timer'):
+                self.reactor.unregister_timer(self.writer_timer)
+        except Exception as e:
+            logging.error(f"ACE: Error unregistering timers: {e}")
+
+        # Reset state
+        with self._lock:
+            self._request_in_flight = False
+            self._pending_request_id = None
+        self.read_buffer = bytearray()
 
     def _connect(self, eventtime):
-        self.log_always('Try connecting')
+        """Attempt to connect to ACE device via serial port"""
+        logging.info(f'ACE: Attempting connection to {self.serial_id}')
 
         def info_callback(self, response):
-            if 'msg' in response and response['msg'] != 'success':
-                self.log_error("ACE Error: " + response['msg'])
+            """Handle device info response after connection"""
+            if 'code' in response and response['code'] != 0:
+                self.log_error(f"ACE Error: {response.get('msg', 'Unknown error')}")
+                return
+
+            result = response.get('result', {})
+            model = result.get('model', 'Unknown')
+            firmware = result.get('firmware', 'Unknown')
+
             self.log_always("{2}ACE: Connected to %s {0} \n Firmware Version: {3}%s{0}" %
-                            (response['result']['model'], response['result']['firmware']), True)
+                            (model, firmware), True)
+
+            # Log firmware info for debugging chaining issues
+            logging.info(f'ACE: Device Model: {model}, Firmware: {firmware}')
+            logging.debug(f'ACE: Full device info: {json.dumps(result, indent=2)}')
+
+            # Check if response contains any chain-related information
+            if 'chain_mode' in result or 'num_devices' in result:
+                logging.info('ACE: Chain information detected in device info')
+            else:
+                logging.debug('ACE: No chain information in device info')
 
         try:
             self._serial = serial.Serial(
@@ -359,28 +689,84 @@ class BunnyAce:
                 write_timeout=0)
 
             if self._serial.is_open:
+                # Reset state for new connection
                 self._connected = True
                 self._request_id = 0
-                logging.info('ACE: Connected to ' + self.serial_id)
-                self.writer_timer = self.reactor.register_timer(self._writer, eventtime + 2)
-                self.reader_timer = self.reactor.register_timer(self._reader, eventtime + 2)
-                self.send_request(request={"method": "get_info"},
-                                  callback=lambda self, response: info_callback(self, response))
+                with self._lock:
+                    self._request_in_flight = False
+                    self._pending_request_id = None
+                self.read_buffer = bytearray()
+
+                logging.info(f'ACE: Successfully connected to {self.serial_id}')
+
+                # Start communication timers
+                self.writer_timer = self.reactor.register_timer(self._writer, eventtime + READY_WAIT_DELAY)
+                self.reader_timer = self.reactor.register_timer(self._reader, eventtime + READY_WAIT_DELAY)
+
+                # Request device info
+                self.send_request(
+                    request={"method": "get_info"},
+                    callback=lambda self, response: info_callback(self, response))
+
+                # Re-enable feed assist if it was previously enabled
                 if self._feed_assist_index != -1:
-                    self._enable_feed_assist(self._feed_assist_index)
-                self.reactor.unregister_timer(self.connect_timer)
+                    logging.info(f'ACE: Re-enabling feed assist for gate {self._feed_assist_index}')
+                    try:
+                        self._enable_feed_assist(self._feed_assist_index)
+                    except Exception as e:
+                        logging.error(f'ACE: Failed to re-enable feed assist: {e}')
+
+                # Stop connection retry timer
+                if hasattr(self, 'connect_timer'):
+                    self.reactor.unregister_timer(self.connect_timer)
+
                 return self.reactor.NEVER
-        except serial.serialutil.SerialException:
+
+        except serial.serialutil.SerialException as e:
             self._serial = None
-            logging.info('ACE: Conn error')
-            self.log_error('Error connecting to ' + self.serial_id)
+            logging.warning(f'ACE: Serial connection error to {self.serial_id}: {e}')
+            self.log_error(f'Cannot connect to {self.serial_id} - retrying...')
         except Exception as e:
-            self.log_error("ACE Error: %s" % str(e))
+            self._serial = None
+            logging.error(f'ACE: Unexpected connection error: {e}')
+            self.log_error(f"ACE connection error: {e}")
 
-        return eventtime + 1
+        # Retry connection after delay
+        return eventtime + CONNECT_RETRY_DELAY
 
-    def _calc_crc(self, buffer):
-        _crc = 0xffff
+    def _reconnect_with_backoff(self, eventtime):
+        """Reconnect with exponential backoff after connection loss"""
+        max_retries = 10
+        base_delay = 1.0
+        max_delay = 30.0
+
+        if self._connection_retry_count >= max_retries:
+            self.log_error(f"Failed to reconnect to ACE after {max_retries} attempts")
+            self.log_error("Please check device connection and restart Klipper")
+            return self.reactor.NEVER
+
+        # Try to reconnect
+        try:
+            result = self._connect(eventtime)
+            if result == self.reactor.NEVER:
+                # Success - reset retry counter
+                self._connection_retry_count = 0
+                logging.info(f"ACE: Successfully reconnected to {self.serial_id}")
+                self.log_always(f"{{2}}ACE: Reconnected to {self.serial_id}{{0}}", True)
+                return self.reactor.NEVER
+        except Exception as e:
+            logging.warning(f"ACE: Reconnection attempt {self._connection_retry_count + 1} failed: {e}")
+
+        # Calculate backoff delay
+        self._connection_retry_count += 1
+        delay = min(base_delay * (2 ** self._connection_retry_count), max_delay)
+
+        logging.info(f"ACE: Retrying connection in {delay:.1f}s... (attempt {self._connection_retry_count}/{max_retries})")
+        return eventtime + delay
+
+    def _calc_crc(self, buffer: bytes) -> int:
+        """Calculate CRC16 for ACE protocol"""
+        _crc = CRC_INIT_VALUE
         for byte in buffer:
             data = byte
             data ^= _crc & 0xff
@@ -388,36 +774,66 @@ class BunnyAce:
             _crc = ((data << 8) | (_crc >> 8)) ^ (data >> 4) ^ (data << 3)
         return _crc
 
-    def _send_request(self, request):
-        if not 'id' in request:
+    def _send_request(self, request: Dict[str, Any]) -> None:
+        """Send a JSON-RPC request to ACE device"""
+        if 'id' not in request:
             request['id'] = self._get_next_request_id()
 
         payload = json.dumps(request)
         payload = bytes(payload, 'utf-8')
 
-        data = bytes([0xFF, 0xAA])
+        data = PROTOCOL_HEAD_BYTES
         data += struct.pack('@H', len(payload))
         data += payload
         data += struct.pack('@H', self._calc_crc(payload))
-        data += bytes([0xFE])
+        data += bytes([PROTOCOL_TAIL_BYTE])
         self._serial.write(data)
 
     def _reader(self, eventtime):
-
-        if self.lock and (self.reactor.monotonic() - self.send_time) > 2:
-            self.lock = False
-            self.read_buffer = bytearray()
-            self.gcode.respond_info(f"timeout {self.reactor.monotonic()} {self._serial.is_open}")
+        # Check for request timeout
+        with self._lock:
+            if self._request_in_flight and self.send_time and (self.reactor.monotonic() - self.send_time) > REQUEST_TIMEOUT:
+                self._request_in_flight = False
+                self._pending_request_id = None
+                self.read_buffer = bytearray()
+                self.log_warning(f"Request timeout after {REQUEST_TIMEOUT}s")
 
         try:
-            if self.lock and self._serial.in_waiting:
+            with self._lock:
+                should_read = self._request_in_flight
+
+            if should_read and self._serial.in_waiting:
                 raw_bytes = self._serial.read(size=self._serial.in_waiting)
             else:
                 raw_bytes = bytearray()
-        except Exception:
-            self.log_error("Unable to communicate with the ACE PRO")
-            self.log_warning("Try reconnecting")
-            self.lock = False
+        except serial.SerialException as e:
+            self.log_error(f"ACE communication error: {e}")
+
+            # Check if device still exists
+            if not os.path.exists(self.serial_id):
+                self.log_warning(f"ACE device {self.serial_id} disconnected")
+                self.log_warning("Waiting for device to reconnect...")
+
+                # Enter reconnection mode with exponential backoff
+                self._serial_disconnect()
+                self._connection_retry_count = 0
+                self.connect_timer = self.reactor.register_timer(
+                    self._reconnect_with_backoff,
+                    self.reactor.NOW
+                )
+                return self.reactor.NEVER
+
+            # Device exists but communication failed - try to recover
+            self.log_warning("Communication failed, attempting to reconnect...")
+            self._serial_disconnect()
+            self.connect_timer = self.reactor.register_timer(self._connect, self.reactor.NOW)
+            return self.reactor.NEVER
+        except Exception as e:
+            self.log_error(f"Unable to communicate with the ACE PRO: {e}")
+            self.log_warning("Attempting to reconnect...")
+            with self._lock:
+                self._request_in_flight = False
+                self._pending_request_id = None
             self._serial_disconnect()
             self.connect_timer = self.reactor.register_timer(self._connect, self.reactor.NOW)
             return self.reactor.NEVER
@@ -430,73 +846,119 @@ class BunnyAce:
                 self.read_buffer = bytearray()
             else:
                 self.read_buffer += raw_bytes
-                return eventtime + 0.2
+                return eventtime + READER_POLL_INTERVAL
         else:
-            return eventtime + 0.2
+            return eventtime + READER_POLL_INTERVAL
 
-        if len(buffer) < 7:
-            return eventtime + 0.2
+        if len(buffer) < PROTOCOL_MIN_PACKET_SIZE:
+            return eventtime + READER_POLL_INTERVAL
 
-        if buffer[0:2] != bytes([0xFF, 0xAA]):
-            self.lock = False
-            self.gcode.respond_info("Invalid data from ACE PRO (head bytes)")
-            self.gcode.respond_info(str(buffer))
-            return eventtime + 0.2
+        if buffer[0:2] != PROTOCOL_HEAD_BYTES:
+            with self._lock:
+                self._request_in_flight = False
+                self._pending_request_id = None
+            self.log_warning("Invalid protocol header from ACE PRO")
+            logging.debug(f"Invalid buffer: {buffer.hex()}")
+            return eventtime + READER_POLL_INTERVAL
 
         payload_len = struct.unpack('<H', buffer[2:4])[0]
-        # logging.info(str(buffer))
         payload = buffer[4:4 + payload_len]
 
         crc_data = buffer[4 + payload_len:4 + payload_len + 2]
         crc = struct.pack('@H', self._calc_crc(payload))
 
         if len(buffer) < (4 + payload_len + 2 + 1):
-            self.lock = False
-            self.gcode.respond_info(f"Invalid data from ACE PRO (len) {payload_len} {len(buffer)} {crc}")
-            self.gcode.respond_info(str(buffer))
-            return eventtime + 0.2
+            with self._lock:
+                self._request_in_flight = False
+                self._pending_request_id = None
+            self.log_warning(f"Incomplete packet from ACE PRO: expected {4 + payload_len + 3}, got {len(buffer)}")
+            return eventtime + READER_POLL_INTERVAL
 
         if crc_data != crc:
-            self.lock = False
-            self.gcode.respond_info('Invalid data from ACE PRO (CRC)')
+            with self._lock:
+                self._request_in_flight = False
+                self._pending_request_id = None
+            self.log_error(f"CRC mismatch from ACE PRO: expected {crc.hex()}, got {crc_data.hex()}")
+            return eventtime + READER_POLL_INTERVAL
 
-        ret = json.loads(payload.decode('utf-8'))
-        id = ret['id']
-        if id in self._callback_map:
-            callback = self._callback_map.pop(id)
-            callback(self=self, response=ret)
-            self.lock = False
-        return eventtime + 0.2
+        try:
+            ret = json.loads(payload.decode('utf-8'))
+            request_id = ret.get('id')
+
+            with self._lock:
+                if request_id in self._callback_map:
+                    callback = self._callback_map.pop(request_id)
+                    self._request_in_flight = False
+                    self._pending_request_id = None
+                    # Execute callback outside lock to prevent deadlock
+                    callback(self=self, response=ret)
+                else:
+                    logging.warning(f"ACE: Received response for unknown request ID {request_id}")
+        except (json.JSONDecodeError, KeyError) as e:
+            self.log_error(f"Invalid JSON response from ACE PRO: {e}")
+            with self._lock:
+                self._request_in_flight = False
+                self._pending_request_id = None
+
+        return eventtime + READER_POLL_INTERVAL
 
     def _writer(self, eventtime):
         try:
             def callback(self, response):
                 if response is not None:
-                    self._info = response['result']
-                    self.gate_status = [data['status'] for data in self._info['slots']]
+                    self._info = response.get('result', {})
+                    # Dynamically detect number of gates from response
+                    if 'slots' in self._info and len(self._info['slots']) > 0:
+                        detected_gates = len(self._info['slots'])
+                        if detected_gates != self.num_gates:
+                            self.num_gates = detected_gates
+                            self.gate_status = ['empty'] * self.num_gates
+                            logging.info(f'ACE: Detected {self.num_gates} gates (chained devices)')
+                            # Debug: Log the full response to help diagnose chaining issues
+                            logging.debug(f'ACE: Full status response: {json.dumps(self._info, indent=2)}')
+                    self.gate_status = [data['status'] for data in self._info.get('slots', [])]
 
-            if not self.lock:
-                if not self._queue.empty():
-                    task = self._queue.get()
-                    if task is not None:
-                        id = self._get_next_request_id()
-                        self._callback_map[id] = task[1]
-                        task[0]['id'] = id
-                        self._send_request(task[0])
+            with self._lock:
+                can_send = not self._request_in_flight
+
+            if can_send:
+                # Check for queued user requests first
+                task = None
+                try:
+                    task = self._queue.get_nowait()
+                except queue.Empty:
+                    pass
+
+                if task is not None:
+                    request_id = self._get_next_request_id()
+                    with self._lock:
+                        self._callback_map[request_id] = task[1]
+                        self._request_in_flight = True
+                        self._pending_request_id = request_id
+                    task[0]['id'] = request_id
+                    self._send_request(task[0])
+                    self.send_time = self.reactor.monotonic()
                 else:
-                    id = self._get_next_request_id()
-                    self._callback_map[id] = callback
-                    self._send_request({"id": id, "method": "get_status"})
-                self.send_time = eventtime
-                self.lock = True
-        except Exception:
-            logging.info('ACE error: ' + traceback.format_exc())
-            self.lock = False
-            self.gcode.respond_info('Try reconnecting')
+                    # Only poll status if no user requests pending
+                    request_id = self._get_next_request_id()
+                    with self._lock:
+                        self._callback_map[request_id] = callback
+                        self._request_in_flight = True
+                        self._pending_request_id = request_id
+                    self._send_request({"id": request_id, "method": "get_status"})
+                    self.send_time = self.reactor.monotonic()
+
+        except Exception as e:
+            logging.error(f'ACE writer error: {e}\n{traceback.format_exc()}')
+            with self._lock:
+                self._request_in_flight = False
+                self._pending_request_id = None
+            self.log_error('Communication error - attempting reconnection')
             self._serial_disconnect()
             self.connect_timer = self.reactor.register_timer(self._connect, self.reactor.NOW)
             return self.reactor.NEVER
-        return eventtime + 0.5
+
+        return eventtime + WRITER_POLL_INTERVAL
 
     def send_request(self, request, callback):
         self._info['status'] = 'busy'
@@ -554,27 +1016,63 @@ class BunnyAce:
                 self.log_warning('Filament runout! Endless spool disabled')
 
     def _create_mmu_sensor(self, config, pin, name, handler=None):
-
+        # Instead of trying to load a full filament_switch_sensor object,
+        # we'll create our own minimal implementation using just the endstop
         section = "filament_switch_sensor %s" % name
-        config.fileconfig.add_section(section)
-        config.fileconfig.set(section, "switch_pin", pin)
-        config.fileconfig.set(section, "pause_on_runout", "False")
-        fs = self.printer.load_object(config, section)
 
+        # Create our custom runout helper that handles all the logic
         ro_helper = MmuRunoutHelper(self.printer, name, 0.1, '', '', '',
                                     False, handler, pin)
-        fs.runout_helper = ro_helper
-        fs.get_status = ro_helper.get_status
 
+        # Create a minimal sensor object with just what we need
+        class MinimalSensor:
+            def __init__(self, helper, endstop_pin):
+                self.runout_helper = helper
+                self.get_status = helper.get_status
+                self.name = helper.name
+                self.pin = endstop_pin
+
+        # Set up the endstop pin for monitoring
         ppins = self.printer.lookup_object('pins')
         pin_params = ppins.parse_pin(pin, True, True)
         share_name = "%s:%s" % (pin_params['chip_name'], pin_params['pin'])
         ppins.allow_multi_use_pin(share_name)
         mcu_endstop = ppins.setup_pin('endstop', pin)
 
-        query_endstops = self.printer.load_object(config, "query_endstops")
-        query_endstops.register_endstop(mcu_endstop, share_name)
+        # Create the minimal sensor object
+        fs = MinimalSensor(ro_helper, mcu_endstop)
+
+        # Store the endstop for later use
         self.endstops[name] = mcu_endstop
+
+        # Store the sensor in printer's objects so lookup_object can find it
+        self.printer.objects[section] = fs
+
+        # Register the endstop when klippy is ready (query_endstops may not exist yet)
+        def register_endstop():
+            try:
+                query_endstops = self.printer.lookup_object('query_endstops')
+                query_endstops.register_endstop(mcu_endstop, share_name)
+            except:
+                logging.info(f"ACE: query_endstops not available for {name}")
+
+            # Set up polling for this sensor
+            self._setup_sensor_polling(mcu_endstop, ro_helper)
+
+        self.printer.register_event_handler("klippy:ready", register_endstop)
+
+    def _setup_sensor_polling(self, endstop, helper):
+        # Set up periodic polling of the sensor state
+        def poll_sensor(eventtime):
+            # Query the endstop state
+            try:
+                state = endstop.query_endstop(eventtime)
+                helper.note_filament_present(eventtime, state)
+            except:
+                pass
+            return eventtime + 0.1  # Poll every 100ms
+
+        self.reactor.register_timer(poll_sensor, self.reactor.NOW)
 
 
 
@@ -612,38 +1110,44 @@ class BunnyAce:
 
         self.send_request(request={"method": "drying_stop"}, callback=callback)
 
-    def _enable_feed_assist(self, index):
+    def _enable_feed_assist(self, index: int) -> None:
+        """Enable feed assist for a specific gate"""
+        self._validate_gate_index(index)
+
         def callback(self, response):
             if 'code' in response and response['code'] != 0:
                 self.log_error("ACE Error: " + response['msg'])
             else:
                 self._feed_assist_index = index
-                self.gcode.respond_info(str(response))
+                logging.debug(f"Feed assist enabled for gate {index}")
 
         self.send_request(request={"method": "start_feed_assist", "params": {"index": index}}, callback=callback)
-        self.dwell(delay=0.7)
+        self.dwell(delay=FEED_ASSIST_DELAY)
 
     cmd_ACE_ENABLE_FEED_ASSIST_help = 'Enables ACE feed assist'
 
     def cmd_ACE_ENABLE_FEED_ASSIST(self, gcmd):
         index = gcmd.get_int('INDEX')
 
-        if index < 0 or index >= 4:
-            raise gcmd.error('Wrong index')
+        if index < 0 or index >= self.num_gates:
+            raise gcmd.error(f'Wrong index (valid range: 0-{self.num_gates-1})')
 
         self._enable_feed_assist(index)
 
-    def _disable_feed_assist(self, index):
+    def _disable_feed_assist(self, index: int) -> None:
+        """Disable feed assist for a specific gate"""
+        self._validate_gate_index(index)
+
         def callback(self, response):
             if 'code' in response and response['code'] != 0:
                 self.log_error("ACE Error: " + response['msg'])
                 return
 
             self._feed_assist_index = -1
-            self.gcode.respond_info('Disabled ACE feed assist')
+            logging.debug(f"Feed assist disabled for gate {index}")
 
         self.send_request(request={"method": "stop_feed_assist", "params": {"index": index}}, callback=callback)
-        self.dwell(0.3)
+        self.dwell(FEED_ASSIST_DISABLE_DELAY)
 
     cmd_ACE_DISABLE_FEED_ASSIST_help = 'Disables ACE feed assist'
 
@@ -653,24 +1157,27 @@ class BunnyAce:
         else:
             index = gcmd.get_int('INDEX')
 
-        if index < 0 or index >= 4:
-            raise gcmd.error('Wrong index')
+        if index < 0 or index >= self.num_gates:
+            raise gcmd.error(f'Wrong index (valid range: 0-{self.num_gates-1})')
 
         self._disable_feed_assist(index)
 
-    def _feed(self, index, length, speed, how_wait=None):
+    def _feed(self, index: int, length: int, speed: int, how_wait: Optional[int] = None) -> None:
+        """Feed filament from ACE to extruder"""
+        self._validate_gate_index(index)
+        self._validate_positive(length, "length")
+        self._validate_positive(speed, "speed")
+
         def callback(self, response):
             if 'code' in response and response['code'] != 0:
-                self.log_error("ACE Error: " + response['msg'])
+                self.log_error("ACE Error: " + response.get('msg', 'Unknown error'))
                 return
 
         self.send_request(
             request={"method": "feed_filament", "params": {"index": index, "length": length, "speed": speed}},
             callback=callback)
-        if how_wait is not None:
-            self.dwell(delay=(how_wait / speed) + 0.1)
-        else:
-            self.dwell(delay=(length / speed) + 0.1)
+        wait_time = (how_wait if how_wait is not None else length) / speed + 0.1
+        self.dwell(delay=wait_time)
 
     cmd_ACE_FEED_help = 'Feeds filament from ACE'
 
@@ -679,8 +1186,8 @@ class BunnyAce:
         length = gcmd.get_int('LENGTH')
         speed = gcmd.get_int('SPEED', self.feed_speed)
 
-        if index < 0 or index >= 4:
-            raise gcmd.error('Wrong index')
+        if index < 0 or index >= self.num_gates:
+            raise gcmd.error(f'Wrong index (valid range: 0-{self.num_gates-1})')
         if length <= 0:
             raise gcmd.error('Wrong length')
         if speed <= 0:
@@ -688,10 +1195,15 @@ class BunnyAce:
 
         self._feed(index, length, speed)
 
-    def _retract(self, index, length, speed):
+    def _retract(self, index: int, length: int, speed: int) -> None:
+        """Retract filament back to ACE"""
+        self._validate_gate_index(index)
+        self._validate_positive(length, "length")
+        self._validate_positive(speed, "speed")
+
         def callback(self, response):
             if 'code' in response and response['code'] != 0:
-                self.log_error("ACE Error: " + response['msg'])
+                self.log_error("ACE Error: " + response.get('msg', 'Unknown error'))
                 return
 
         self.send_request(
@@ -706,8 +1218,8 @@ class BunnyAce:
         length = gcmd.get_int('LENGTH')
         speed = gcmd.get_int('SPEED', self.retract_speed)
 
-        if index < 0 or index >= 4:
-            raise gcmd.error('Wrong index')
+        if index < 0 or index >= self.num_gates:
+            raise gcmd.error(f'Wrong index (valid range: 0-{self.num_gates-1})')
         if length <= 0:
             raise gcmd.error('Wrong length')
         if speed <= 0:
@@ -787,8 +1299,8 @@ class BunnyAce:
         tool = gcmd.get_int('TOOL')
         sensor_extruder = self.printer.lookup_object("filament_switch_sensor %s" % "extruder_sensor", None)
 
-        if tool < -1 or tool >= 4:
-            raise gcmd.error('Wrong tool')
+        if tool < -1 or tool >= self.num_gates:
+            raise gcmd.error(f'Wrong tool (valid range: -1 or 0-{self.num_gates-1})')
 
         was = self.save_variables.allVariables.get('ace_current_index', -1)
         if was == tool:
@@ -858,10 +1370,16 @@ class BunnyAce:
                 gcmd.respond_info('ACE: Bad params')
                 return
             if color is not None:
+                if 'ace_gate_color' not in self.save_variables.allVariables:
+                    self.save_variables.allVariables['ace_gate_color'] = ['FFFFFF', 'FFFFFF', 'FFFFFF', 'FFFFFF']
                 self.save_variables.allVariables['ace_gate_color'][gate] = color
             if type is not None:
+                if 'ace_gate_type' not in self.save_variables.allVariables:
+                    self.save_variables.allVariables['ace_gate_type'] = ['', '', '', '']
                 self.save_variables.allVariables['ace_gate_type'][gate] = type
             if temp is not None:
+                if 'ace_gate_temp' not in self.save_variables.allVariables:
+                    self.save_variables.allVariables['ace_gate_temp'] = [0, 0, 0, 0]
                 self.save_variables.allVariables['ace_gate_temp'][gate] = temp
             self.write_variables()
         else:
@@ -887,25 +1405,1049 @@ class BunnyAce:
         except Exception as e:
             self.gcode.respond_info('Error: ' + str(e))
 
+    cmd_ACE_GET_STATUS_help = 'Get detailed ACE status including slot information'
+
+    def cmd_ACE_GET_STATUS(self, gcmd):
+        """Query and display full ACE status to help diagnose chaining issues"""
+        def callback(self, response):
+            if response is not None and 'result' in response:
+                result = response['result']
+
+                # Display summary
+                self.gcode.respond_info('=== ACE Status ===')
+                self.gcode.respond_info(f"Status: {result.get('status', 'unknown')}")
+                self.gcode.respond_info(f"Temperature: {result.get('temp', 0)}°C")
+
+                # Display slot information
+                if 'slots' in result:
+                    slots = result['slots']
+                    self.gcode.respond_info(f"\n=== Slots ({len(slots)} detected) ===")
+                    for slot in slots:
+                        idx = slot.get('index', '?')
+                        status = slot.get('status', 'unknown')
+                        sku = slot.get('sku', 'N/A')
+                        filament_type = slot.get('type', 'N/A')
+                        color = slot.get('color', [0, 0, 0])
+                        self.gcode.respond_info(
+                            f"Slot {idx}: {status} | Type: {filament_type} | "
+                            f"SKU: {sku} | Color: RGB{color}"
+                        )
+                else:
+                    self.gcode.respond_info("No slot information in response")
+
+                # Display dryer status if available
+                if 'dryer_status' in result:
+                    dryer = result['dryer_status']
+                    self.gcode.respond_info(f"\n=== Dryer ===")
+                    self.gcode.respond_info(
+                        f"Status: {dryer.get('status', 'unknown')} | "
+                        f"Target: {dryer.get('target_temp', 0)}°C | "
+                        f"Remaining: {dryer.get('remain_time', 0)}min"
+                    )
+
+                # Display full JSON for debugging
+                self.gcode.respond_info('\n=== Full Response (for debugging) ===')
+                self.gcode.respond_info(json.dumps(result, indent=2))
+            else:
+                self.gcode.respond_info('No response or invalid response from ACE')
+
+        self.send_request(request={"method": "get_status"}, callback=callback)
+
     def get_status(self, eventtime=None):
+        # Ensure gate arrays match the detected number of gates
+        default_colors = ['FFFFFF'] * self.num_gates
+        default_types = [''] * self.num_gates
+        default_temps = [230] * self.num_gates
+        default_spool_ids = list(range(1, self.num_gates + 1))
+
+        # Get saved variables and expand if needed
+        gate_colors = list(self.save_variables.allVariables.get('ace_gate_color', default_colors))
+        gate_types = list(self.save_variables.allVariables.get('ace_gate_type', default_types))
+        gate_temps = list(self.save_variables.allVariables.get('ace_gate_temp', default_temps))
+
+        # Extend arrays if more gates detected than previously saved
+        while len(gate_colors) < self.num_gates:
+            gate_colors.append('FFFFFF')
+        while len(gate_types) < self.num_gates:
+            gate_types.append('')
+        while len(gate_temps) < self.num_gates:
+            gate_temps.append(230)
+
+        # Update saved variables if they were expanded
+        if len(gate_colors) != len(self.save_variables.allVariables.get('ace_gate_color', [])):
+            self.save_variable('ace_gate_color', gate_colors, True)
+        if len(gate_types) != len(self.save_variables.allVariables.get('ace_gate_type', [])):
+            self.save_variable('ace_gate_type', gate_types, True)
+        if len(gate_temps) != len(self.save_variables.allVariables.get('ace_gate_temp', [])):
+            self.save_variable('ace_gate_temp', gate_temps, True)
 
         return {
             'status': self._info['status'],
             'temp': self._info['temp'],
             'dryer_status': self._info['dryer_status'],
-            'gate_color': list(self.save_variables.allVariables.get('ace_gate_color',
-                                                                    ['FFFFFF', 'FFFFFF', 'FFFFFF', 'FFFFFF'])),
-            'gate_material': list(self.save_variables.allVariables.get('ace_gate_type',
-                                                                       ['', '', '', ''])),
-            'gate_temp': list(self.save_variables.allVariables.get('ace_gate_temp',
-                                                                   [230, 230, 230, 230])),
+            'gate_color': gate_colors[:self.num_gates],
+            'gate_material': gate_types[:self.num_gates],
+            'gate_temp': gate_temps[:self.num_gates],
             'active_gate': self.gate_status,
-            'spool_id': [1, 1, 1, 2],
+            'spool_id': default_spool_ids,
             'selected_gate': int(self.save_variables.allVariables.get('ace_current_index', -1)),
             'endless_spool': bool(self.save_variables.allVariables.get('ace_endless_spool', False)),
+            'num_gates': self.num_gates,
         }
 
 
+class AceManager:
+    """Manages multiple ACE Pro devices as a unified multi-gate system"""
+
+    def __init__(self, config):
+        self.printer = config.get_printer()
+        self.reactor = self.printer.get_reactor()
+        self.gcode = self.printer.lookup_object('gcode')
+        self.name = config.get_name()
+        self.config = config
+
+        # ACE device configuration
+        self.ace_devices = []
+        self.total_gates = 0
+        self.use_direct_serial = False
+
+        # Check which configuration method is used
+        serial_ports_str = config.get('serial_ports', None)
+        ace_devices_str = config.get('ace_devices', None)
+        auto_detect = config.getboolean('auto_detect', False)
+
+        # Pre-read all possible config parameters to make them "valid" in Klipper's eyes
+        # This prevents "Option X is not valid" errors during config validation
+        # We don't use these values here, but reading them registers them as valid options
+        config.getint('baud', 115200)
+        config.get('extruder_sensor_pin', None)
+        config.get('toolhead_sensor_pin', None)
+        config.getint('extruder_move_speed', 10)
+        config.getint('toolhead_homing_speed', 20)
+        config.getint('feed_speed', 80)
+        config.getint('retract_speed', 80)
+        config.getint('toolchange_retract_length', 170)
+        config.getint('toolchange_feed_length', 800)
+        config.getint('toolhead_sensor_to_nozzle', 40)
+        config.get('poop_macros', '_POOP')
+        config.get('cut_macros', '_CUT_TIP')
+        config.getint('max_dryer_temperature', 70)
+
+        if serial_ports_str:
+            # Method 1: Direct serial ports (recommended)
+            self.use_direct_serial = True
+            self._setup_from_serial_ports(config, serial_ports_str)
+        elif auto_detect:
+            # Method 2: Auto-detect ACE devices
+            self.use_direct_serial = True
+            self._setup_auto_detect(config)
+        elif ace_devices_str:
+            # Method 3: Named ACE devices (backward compatible)
+            self._setup_from_ace_devices(ace_devices_str)
+        else:
+            config.error("ace_manager requires one of: serial_ports, ace_devices, or auto_detect=true")
+
+        # Calculate gate offsets
+        offset = 0
+        for device in self.ace_devices:
+            device['gate_offset'] = offset
+            offset += 4  # Each ACE has 4 gates
+
+        self.total_gates = offset
+
+        # Register event handlers
+        self.printer.register_event_handler('klippy:ready', self._handle_ready)
+        self.printer.register_event_handler('klippy:connect', self._handle_connect)
+
+        # Register unified commands (for all configuration methods)
+        self.gcode.register_command(
+            'ACE_CHANGE_TOOL', self.cmd_ACE_CHANGE_TOOL,
+            desc=self.cmd_ACE_CHANGE_TOOL_help)
+        self.gcode.register_command(
+            'ACE_GET_STATUS', self.cmd_ACE_GET_STATUS,
+            desc=self.cmd_ACE_GET_STATUS_help)
+        self.gcode.register_command(
+            'ACE_FEED', self.cmd_ACE_FEED,
+            desc=self.cmd_ACE_FEED_help)
+        self.gcode.register_command(
+            'ACE_RETRACT', self.cmd_ACE_RETRACT,
+            desc=self.cmd_ACE_RETRACT_help)
+        self.gcode.register_command(
+            'ACE_GATE_MAP', self.cmd_ACE_GATE_MAP,
+            desc=self.cmd_ACE_GATE_MAP_help)
+        self.gcode.register_command(
+            'ACE_SCAN_DEVICES', self.cmd_ACE_SCAN_DEVICES,
+            desc=self.cmd_ACE_SCAN_DEVICES_help)
+        self.gcode.register_command(
+            'ACE_LIST_DEVICES', self.cmd_ACE_LIST_DEVICES,
+            desc=self.cmd_ACE_LIST_DEVICES_help)
+        self.gcode.register_command(
+            'ACE_REORDER_DEVICES', self.cmd_ACE_REORDER_DEVICES,
+            desc=self.cmd_ACE_REORDER_DEVICES_help)
+
+    def _setup_from_serial_ports(self, config, serial_ports_str):
+        """Setup ACE devices from comma-separated serial port list"""
+        import re
+
+        # Parse comma-separated serial ports
+        serial_ports = [p.strip() for p in serial_ports_str.split(',')]
+
+        logging.info(f"ACE Manager: Setting up {len(serial_ports)} ACE devices from serial_ports")
+
+        # Read parameters from fileconfig directly to bypass validation
+        # This allows us to read parameters without Klipper complaining they're not "valid"
+        def get_param(key, default=None):
+            section = config.get_name()
+            if config.fileconfig.has_option(section, key):
+                return config.fileconfig.get(section, key)
+            return default
+
+        def get_param_int(key, default=None):
+            val = get_param(key, default)
+            return int(val) if val is not None else default
+
+        # Create BunnyAce instances directly
+        for i, port in enumerate(serial_ports):
+            # Create a pseudo-config for this ACE instance
+            ace_name = f"ace{i+1}"
+
+            # Create config dict with all shared parameters
+            # Get required extruder_sensor_pin (no default - must be present)
+            extruder_pin = get_param('extruder_sensor_pin')
+            if not extruder_pin:
+                config.error("ace_manager requires 'extruder_sensor_pin' parameter")
+
+            ace_config = {
+                'serial': port,
+                'baud': get_param_int('baud', 115200),
+                'extruder_sensor_pin': extruder_pin,
+                'toolhead_sensor_pin': get_param('toolhead_sensor_pin', None),
+                'extruder_move_speed': get_param_int('extruder_move_speed', 10),
+                'toolhead_homing_speed': get_param_int('toolhead_homing_speed', 20),
+                'feed_speed': get_param_int('feed_speed', 80),
+                'retract_speed': get_param_int('retract_speed', 80),
+                'toolchange_retract_length': get_param_int('toolchange_retract_length', 170),
+                'toolchange_feed_length': get_param_int('toolchange_feed_length', 800),
+                'toolhead_sensor_to_nozzle': get_param_int('toolhead_sensor_to_nozzle', 40),
+                'poop_macros': get_param('poop_macros', '_POOP'),
+                'cut_macros': get_param('cut_macros', '_CUT_TIP'),
+                'max_dryer_temperature': get_param_int('max_dryer_temperature', 70),
+                'gate_offset': i * 4  # Calculate offset based on index
+            }
+
+            # Create a ConfigWrapper-like object
+            class AceConfigWrapper:
+                def __init__(self, printer, name, ace_config, parent_config):
+                    self._printer = printer
+                    self._name = name
+                    self._config = ace_config
+                    self.fileconfig = parent_config.fileconfig  # Pass through parent's fileconfig
+
+                def get_printer(self):
+                    return self._printer
+
+                def get_name(self):
+                    return self._name
+
+                def get(self, key, default=None):
+                    # Check if key exists in config
+                    if key not in self._config:
+                        if default is None:
+                            # Key doesn't exist and no default - let Klipper handle the error
+                            raise self.error(f"Option '{key}' in section '{self._name}' must be specified")
+                        return default
+
+                    val = self._config[key]
+                    # If the stored value is None, return the default
+                    if val is None:
+                        return default
+                    return val
+
+                def getint(self, key, default=None, minval=None, maxval=None):
+                    val = self.get(key, default)
+                    if val is None:
+                        if default is None:
+                            raise self.error(f"Option '{key}' in section '{self._name}' must be specified")
+                        return default
+                    result = int(val)
+                    if minval is not None and result < minval:
+                        raise self.error(f"Option '{key}' in section '{self._name}' must be >= {minval}")
+                    if maxval is not None and result > maxval:
+                        raise self.error(f"Option '{key}' in section '{self._name}' must be <= {maxval}")
+                    return result
+
+                def getfloat(self, key, default=None, minval=None, maxval=None, above=None, below=None):
+                    val = self.get(key, default)
+                    if val is None:
+                        if default is None:
+                            raise self.error(f"Option '{key}' in section '{self._name}' must be specified")
+                        return default
+                    result = float(val)
+                    if minval is not None and result < minval:
+                        raise self.error(f"Option '{key}' in section '{self._name}' must be >= {minval}")
+                    if maxval is not None and result > maxval:
+                        raise self.error(f"Option '{key}' in section '{self._name}' must be <= {maxval}")
+                    if above is not None and result <= above:
+                        raise self.error(f"Option '{key}' in section '{self._name}' must be > {above}")
+                    if below is not None and result >= below:
+                        raise self.error(f"Option '{key}' in section '{self._name}' must be < {below}")
+                    return result
+
+                def getboolean(self, key, default=None):
+                    val = self.get(key, default)
+                    if val is None:
+                        return default
+                    if isinstance(val, bool):
+                        return val
+                    # Handle string boolean values
+                    if isinstance(val, str):
+                        val = val.lower()
+                        if val in ('true', '1', 'yes'):
+                            return True
+                        elif val in ('false', '0', 'no'):
+                            return False
+                    return bool(val)
+
+                def getchoice(self, key, choices, default=None):
+                    val = self.get(key, default)
+                    if val is None:
+                        if default is None:
+                            raise self.error(f"Option '{key}' in section '{self._name}' must be specified")
+                        return default
+                    if val not in choices:
+                        raise self.error(f"Option '{key}' in section '{self._name}' is not a valid choice")
+                    return val
+
+                def getlist(self, key, default=None):
+                    val = self.get(key, default)
+                    if val is None:
+                        if default is None:
+                            return []
+                        return default
+                    if isinstance(val, list):
+                        return val
+                    # Parse comma-separated string
+                    return [item.strip() for item in str(val).split(',') if item.strip()]
+
+                def getsection(self, section):
+                    # When loading dynamically created sections (like filament sensors),
+                    # we need to return a config that reads from fileconfig
+                    # Create a wrapper that reads from fileconfig for the requested section
+                    class FileconfigSectionWrapper:
+                        def __init__(self, parent_wrapper, section_name):
+                            self._parent = parent_wrapper
+                            self._section = section_name
+                            self.fileconfig = parent_wrapper.fileconfig
+
+                        def get_printer(self):
+                            return self._parent.get_printer()
+
+                        def get_name(self):
+                            return self._section
+
+                        def get(self, key, default=None):
+                            if self.fileconfig.has_option(self._section, key):
+                                return self.fileconfig.get(self._section, key)
+                            if default is None:
+                                raise Exception(f"Option '{key}' in section '{self._section}' must be specified")
+                            return default
+
+                        def getint(self, key, default=None, minval=None, maxval=None):
+                            val = self.get(key, default)
+                            if val is None:
+                                return default
+                            return int(val)
+
+                        def getfloat(self, key, default=None, minval=None, maxval=None, above=None, below=None):
+                            val = self.get(key, default)
+                            if val is None:
+                                return default
+                            return float(val)
+
+                        def getboolean(self, key, default=None):
+                            val = self.get(key, default)
+                            if val is None:
+                                return default
+                            if isinstance(val, str):
+                                val = val.lower()
+                                return val in ('true', '1', 'yes')
+                            return bool(val)
+
+                        def getchoice(self, key, choices, default=None):
+                            val = self.get(key, default)
+                            if val and val not in choices:
+                                raise Exception(f"Option '{key}' in section '{self._section}' is not valid")
+                            return val
+
+                        def getlist(self, key, default=None):
+                            val = self.get(key, default)
+                            if val is None:
+                                if default is None:
+                                    return []
+                                return default
+                            if isinstance(val, list):
+                                return val
+                            return [item.strip() for item in str(val).split(',') if item.strip()]
+
+                        def getsection(self, section):
+                            return self
+
+                        def error(self, msg):
+                            raise Exception(msg)
+
+                    return FileconfigSectionWrapper(self, section)
+
+                def error(self, msg):
+                    raise Exception(msg)
+
+            # Create ACE instance
+            ace_wrapper = AceConfigWrapper(self.printer, f"ace {ace_name}", ace_config, config)
+            ace_instance = BunnyAce(ace_wrapper)
+
+            # Store device info
+            self.ace_devices.append({
+                'name': ace_name,
+                'port': port,
+                'instance': ace_instance,
+                'gate_offset': i * 4
+            })
+
+            logging.info(f"ACE Manager: Created {ace_name} on {port} with gate offset {i * 4}")
+
+    def _setup_auto_detect(self, config):
+        """Auto-detect ACE devices and create instances using USB enumeration"""
+        logging.info("ACE Manager: Auto-detecting ACE devices via USB enumeration...")
+
+        # Step 1: Scan USB ports for ACE devices
+        discovered_devices = AceDeviceDiscovery.find_ace_devices()
+
+        if not discovered_devices:
+            logging.warning("ACE Manager: No ACE devices found via USB enumeration")
+            logging.warning("ACE Manager: Please check USB connections and verify ACE devices are powered on")
+            # Don't fail - devices might be connected later
+            return
+
+        logging.info(f"ACE Manager: Found {len(discovered_devices)} potential ACE device(s)")
+
+        # Step 2: Probe each device to get device ID and verify it's ACE
+        verified_devices = []
+        for dev_info in discovered_devices:
+            port = dev_info['port']
+            logging.info(f"ACE Manager: Probing {port}...")
+
+            ace_info = AceDeviceDiscovery.probe_ace_device(port)
+            if ace_info:
+                verified_devices.append({
+                    'port': port,
+                    'device_id': ace_info['device_id'],
+                    'model': ace_info['model'],
+                    'firmware': ace_info['firmware'],
+                    'usb_location': dev_info['location']
+                })
+                logging.info(f"  ✓ ACE Device: {ace_info['model']} (ID: {ace_info['device_id']}, FW: {ace_info['firmware']})")
+            else:
+                logging.info(f"  ✗ Not an ACE device or failed to communicate")
+
+        if not verified_devices:
+            logging.warning("ACE Manager: No verified ACE devices found")
+            logging.warning("ACE Manager: Devices may be in use or communication failed")
+            return
+
+        # Step 3: Build serial ports string and store device IDs
+        # Sort by USB location for deterministic ordering
+        verified_devices.sort(key=lambda x: x.get('usb_location', '') or '')
+
+        serial_ports_str = ', '.join([dev['port'] for dev in verified_devices])
+
+        logging.info(f"ACE Manager: Configuring {len(verified_devices)} ACE device(s) with {len(verified_devices) * 4} total gates")
+        logging.info(f"ACE Manager: Port order: {serial_ports_str}")
+
+        # Store device IDs for reconnection logic (will be used in _handle_ready)
+        self.device_ids = {dev['port']: dev['device_id'] for dev in verified_devices}
+        self._verified_devices = verified_devices  # Save for device mapper initialization
+
+        # Use existing serial port setup with discovered ports
+        self._setup_from_serial_ports(config, serial_ports_str)
+
+    def _setup_from_ace_devices(self, ace_devices_str):
+        """Setup from named ACE device configs (backward compatible)"""
+        device_names = [name.strip() for name in ace_devices_str.split(',')]
+
+        logging.info(f"ACE Manager: Setting up {len(device_names)} named ACE devices")
+
+        for name in device_names:
+            self.ace_devices.append({
+                'name': name,
+                'port': 'managed',  # Will be set by individual config
+                'instance': None,  # Will be linked in _handle_ready
+                'gate_offset': 0  # Will be calculated
+            })
+
+    def _handle_ready(self):
+        """Link to ACE instances after all configs are loaded"""
+        # Only link instances if using backward-compatible named device mode
+        if not self.use_direct_serial:
+            for device in self.ace_devices:
+                ace_name = f"ace {device['name']}"
+                try:
+                    device['instance'] = self.printer.lookup_object(ace_name)
+                    logging.info(f"ACE Manager: Linked to {ace_name} at gate offset {device['gate_offset']}")
+                except:
+                    raise self.printer.config_error(
+                        f"ACE Manager: Cannot find ACE device '{ace_name}'. "
+                        f"Make sure [ace {device['name']}] is configured.")
+
+        # Initialize device mapper for auto-detect mode
+        if hasattr(self, '_verified_devices') and self._verified_devices:
+            # Get config directory from first ACE device's save_variables
+            if self.ace_devices and self.ace_devices[0]['instance']:
+                first_ace = self.ace_devices[0]['instance']
+                if hasattr(first_ace, 'save_variables') and first_ace.save_variables:
+                    # Get the variables file path
+                    try:
+                        # Look up the save_variables object to get its filename
+                        save_vars = self.printer.lookup_object('save_variables')
+                        if hasattr(save_vars, 'filename'):
+                            config_dir = os.path.dirname(save_vars.filename)
+                        else:
+                            config_dir = os.path.expanduser('~/printer_data/config')
+                    except:
+                        config_dir = os.path.expanduser('~/printer_data/config')
+
+                    map_file = os.path.join(config_dir, 'ace_device_map.cfg')
+                    self.device_mapper = AceDeviceMapper(map_file)
+
+                    # Update device map with verified devices
+                    for i, dev in enumerate(self._verified_devices):
+                        device_id = dev['device_id']
+                        port = dev['port']
+                        gate_offset = i * 4  # Gates 0-3, 4-7, etc.
+
+                        self.device_mapper.update_device(device_id, port, gate_offset)
+                        logging.info(f"ACE Manager: Mapped device {device_id} to {port} with gate offset {gate_offset}")
+
+                    # Save device map
+                    self.device_mapper.save()
+                    logging.info(f"ACE Manager: Device map saved to {map_file}")
+
+        logging.info(f"ACE Manager: Managing {len(self.ace_devices)} ACE devices with {self.total_gates} total gates")
+
+    def _handle_connect(self):
+        """Handle Klipper connection - attempt to reconnect to ACE devices if they moved ports"""
+        if not hasattr(self, 'device_mapper') or not hasattr(self, 'device_ids'):
+            # Not using auto-detect, skip reconnection logic
+            return
+
+        logging.info("ACE Manager: Klipper connected, checking ACE device ports...")
+
+        # Re-scan USB to find current ports for known device IDs
+        discovered = AceDeviceDiscovery.find_ace_devices()
+
+        for device in self.ace_devices:
+            # Get the device ID for this ACE instance
+            device_id = self.device_ids.get(device.get('port'))
+            if not device_id:
+                continue
+
+            # Try to find this device in current USB enumeration
+            current_port = None
+            for dev_info in discovered:
+                port = dev_info['port']
+                ace_info = AceDeviceDiscovery.probe_ace_device(port)
+                if ace_info and ace_info['device_id'] == device_id:
+                    current_port = port
+                    break
+
+            if current_port:
+                # Check if port changed
+                if current_port != device['port']:
+                    logging.info(f"ACE Manager: Device {device_id} moved from {device['port']} to {current_port}")
+                    old_port = device['port']
+                    device['port'] = current_port
+                    device['instance'].serial_id = current_port
+
+                    # Update device mapper
+                    self.device_mapper.update_device(device_id, current_port)
+                    self.device_mapper.save()
+
+                    # Update device_ids mapping
+                    if old_port in self.device_ids:
+                        del self.device_ids[old_port]
+                    self.device_ids[current_port] = device_id
+
+                    # Trigger reconnection in the BunnyAce instance
+                    logging.info(f"ACE Manager: Triggering reconnection for {device_id} on {current_port}")
+                else:
+                    logging.info(f"ACE Manager: Device {device_id} still on {current_port}")
+            else:
+                logging.warning(f"ACE Manager: Device {device_id} not found, will retry on next connection")
+
+    def _route_to_ace(self, global_gate):
+        """Route a global gate number to the correct ACE instance and local gate"""
+        if global_gate < 0 or global_gate >= self.total_gates:
+            raise self.gcode.error(f"Invalid gate {global_gate} (valid: 0-{self.total_gates-1})")
+
+        for device in self.ace_devices:
+            if global_gate < device['gate_offset'] + 4:
+                local_gate = global_gate - device['gate_offset']
+                return device['instance'], local_gate
+
+        raise self.gcode.error(f"Cannot route gate {global_gate}")
+
+    cmd_ACE_CHANGE_TOOL_help = 'Changes tool (unified across all ACE devices)'
+
+    def cmd_ACE_CHANGE_TOOL(self, gcmd):
+        """Unified tool change that routes to correct ACE"""
+        tool = gcmd.get_int('TOOL')
+
+        if tool == -1:
+            # Unload - use current tool to determine which ACE
+            # For now, try all ACEs (they'll ignore if not loaded)
+            for device in self.ace_devices:
+                try:
+                    device['instance'].cmd_ACE_CHANGE_TOOL(gcmd)
+                except:
+                    pass
+            return
+
+        ace_instance, local_tool = self._route_to_ace(tool)
+
+        # Create new gcmd with local tool number
+        import types
+        local_gcmd = types.SimpleNamespace()
+        local_gcmd.get_int = lambda key, default=None: local_tool if key == 'TOOL' else default
+        local_gcmd.error = gcmd.error
+
+        ace_instance.cmd_ACE_CHANGE_TOOL(local_gcmd)
+
+    def get_status(self, eventtime=None):
+        """
+        Get unified status from all ACE devices for Moonraker API.
+        This method is required for the object to appear in /printer/objects/list
+        """
+        # Initialize aggregated arrays
+        all_gate_colors = []
+        all_gate_materials = []
+        all_gate_temps = []
+        all_active_gates = []
+        all_spool_ids = []
+
+        # Aggregate temperatures and dryer status from first device
+        first_ace = self.ace_devices[0]['instance'] if self.ace_devices else None
+        overall_temp = 0
+        overall_dryer_status = {
+            'status': 'stop',
+            'target_temp': 0,
+            'duration': 0,
+            'remain_time': 0
+        }
+        overall_status = 'ready'
+
+        # Aggregate data from all ACE devices
+        for device in self.ace_devices:
+            ace = device['instance']
+            offset = device['gate_offset']
+
+            # Get status from this ACE
+            status = ace.get_status()
+
+            # Append this ACE's gate data to aggregated arrays
+            all_gate_colors.extend(status.get('gate_color', []))
+            all_gate_materials.extend(status.get('gate_material', []))
+            all_gate_temps.extend(status.get('gate_temp', []))
+            all_active_gates.extend(status.get('active_gate', []))
+
+            # Generate spool IDs with global numbering
+            num_gates = status.get('num_gates', 4)
+            all_spool_ids.extend(range(offset + 1, offset + num_gates + 1))
+
+            # Use first ACE's temp and dryer status
+            if device == self.ace_devices[0]:
+                overall_temp = status.get('temp', 0)
+                overall_dryer_status = status.get('dryer_status', overall_dryer_status)
+                overall_status = status.get('status', 'ready')
+
+        # Get selected gate from first ACE's save variables
+        selected_gate = -1
+        if first_ace:
+            selected_gate = int(first_ace.save_variables.allVariables.get('ace_current_index', -1))
+
+        # Get endless spool setting from first ACE
+        endless_spool = False
+        if first_ace:
+            endless_spool = bool(first_ace.save_variables.allVariables.get('ace_endless_spool', False))
+
+        # Build device summary for web UI
+        devices_summary = []
+        for dev in self.ace_devices:
+            ace = dev['instance']
+            devices_summary.append({
+                'device_id': dev.get('device_id', f"unknown_{dev['port']}"),
+                'name': dev.get('name', f"ACE Unit {dev['gate_offset']//4 + 1}"),
+                'connection_status': 'connected' if ace._connected else 'disconnected',
+                'gate_offset': dev['gate_offset'],
+                'health': self._get_device_health(ace)
+            })
+
+        return {
+            'status': overall_status,
+            'temp': overall_temp,
+            'dryer_status': overall_dryer_status,
+            'gate_color': all_gate_colors,
+            'gate_material': all_gate_materials,
+            'gate_temp': all_gate_temps,
+            'active_gate': all_active_gates,
+            'spool_id': all_spool_ids,
+            'selected_gate': selected_gate,
+            'endless_spool': endless_spool,
+            'num_gates': self.total_gates,
+            'num_devices': len(self.ace_devices),
+            'devices': devices_summary,
+        }
+
+    def get_device_list(self):
+        """
+        Get list of all ACE devices with detailed status and health metrics.
+        Used by Moonraker API for /printer/ace/devices endpoint.
+        """
+        devices = []
+
+        for dev in self.ace_devices:
+            ace = dev['instance']
+            device_info = {
+                'device_id': dev.get('device_id', f"unknown_{dev['port']}"),
+                'name': dev.get('name', f"ACE Unit {dev['gate_offset']//4 + 1}"),
+                'port': dev.get('port', 'Unknown'),
+                'model': dev.get('model', 'Unknown'),
+                'firmware': dev.get('firmware', 'Unknown'),
+                'connection_status': 'connected' if ace._connected else 'disconnected',
+                'gate_offset': dev['gate_offset'],
+                'num_gates': 4,
+                'gates': list(range(dev['gate_offset'], dev['gate_offset'] + 4)),
+                'last_seen': dev.get('last_seen', 0),
+                'health': self._get_device_health(ace)
+            }
+            devices.append(device_info)
+
+        return {
+            'devices': devices,
+            'total_gates': self.total_gates,
+            'auto_detect_enabled': self.config.getboolean('auto_detect', False),
+            'device_map_file': getattr(self, 'device_mapper', None) and
+                              getattr(self.device_mapper, 'config_path', None) or 'N/A'
+        }
+
+    def _get_device_health(self, ace_instance):
+        """
+        Get health metrics for an ACE device instance.
+        Returns: dict with health statistics
+        """
+        # Default health metrics
+        health = {
+            'avg_response_time_ms': 0,
+            'error_count': 0,
+            'last_error': None,
+            'uptime': 0
+        }
+
+        # Try to get actual health stats if the ACE instance tracks them
+        if hasattr(ace_instance, 'health_stats'):
+            health.update(ace_instance.health_stats)
+
+        # Calculate uptime if available
+        if hasattr(ace_instance, 'connect_time'):
+            health['uptime'] = int(time.time() - ace_instance.connect_time)
+
+        return health
+
+    def scan_devices(self, rescan=True, update_map=True):
+        """
+        Manually trigger device scan.
+        Used by Moonraker API for /printer/ace/scan endpoint.
+
+        Args:
+            rescan: If True, re-scan USB ports. If False, just return current devices.
+            update_map: If True, update device map file with new devices.
+
+        Returns: dict with scan results
+        """
+        if not rescan:
+            return {
+                'status': 'success',
+                'devices_found': len(self.ace_devices),
+                'new_devices': 0,
+                'devices': self.get_device_list()
+            }
+
+        # Re-run auto-detection
+        logging.info("ACE Manager: Manual device scan requested")
+        discovered = AceDeviceDiscovery.find_ace_devices()
+        new_devices = []
+
+        for dev_info in discovered:
+            port = dev_info['port']
+            ace_info = AceDeviceDiscovery.probe_ace_device(port)
+
+            if ace_info:
+                device_id = ace_info['device_id']
+                # Check if this is a new device
+                existing_ids = [d.get('device_id') for d in self.ace_devices]
+                if device_id not in existing_ids:
+                    new_devices.append({
+                        'device_id': device_id,
+                        'port': port,
+                        'model': ace_info.get('model', 'Unknown'),
+                        'firmware': ace_info.get('firmware', 'Unknown')
+                    })
+                    logging.info(f"ACE Manager: Found new ACE device: {device_id} at {port}")
+
+        # Update device map if requested and new devices found
+        if update_map and new_devices and hasattr(self, 'device_mapper'):
+            try:
+                self.device_mapper.save()
+                logging.info("ACE Manager: Device map updated")
+            except Exception as e:
+                logging.error(f"ACE Manager: Failed to update device map: {e}")
+
+        return {
+            'status': 'success',
+            'devices_found': len(discovered),
+            'new_devices': len(new_devices),
+            'new_device_list': new_devices,
+            'devices': self.get_device_list()
+        }
+
+    def reorder_gates(self, device_order):
+        """
+        Reorder gate assignments for devices.
+        Used by Moonraker API for /printer/ace/reorder endpoint.
+
+        Args:
+            device_order: List of dicts with 'device_id' and 'gate_offset' keys
+
+        Returns: dict with status
+        """
+        # Validate new order
+        device_ids = [d['device_id'] for d in device_order]
+        current_ids = [d.get('device_id') for d in self.ace_devices]
+
+        if set(device_ids) != set(current_ids):
+            raise Exception("Device order must include all current devices")
+
+        # Validate that gate offsets are multiples of 4 and don't overlap
+        offsets = [d['gate_offset'] for d in device_order]
+        for offset in offsets:
+            if offset % 4 != 0:
+                raise Exception(f"Gate offset {offset} must be a multiple of 4")
+
+        # Check for overlaps
+        if len(offsets) != len(set(offsets)):
+            raise Exception("Gate offsets must be unique")
+
+        # Update device map if available
+        if hasattr(self, 'device_mapper'):
+            for order_info in device_order:
+                device_id = order_info['device_id']
+                new_offset = order_info['gate_offset']
+
+                # Find the device in our list
+                for dev in self.ace_devices:
+                    if dev.get('device_id') == device_id:
+                        # Update the device mapper
+                        self.device_mapper.update_device(device_id, dev.get('port'), new_offset)
+                        break
+
+            try:
+                self.device_mapper.save()
+                logging.info("ACE Manager: Device order updated successfully")
+            except Exception as e:
+                logging.error(f"ACE Manager: Failed to save device order: {e}")
+                raise Exception(f"Failed to save device order: {e}")
+        else:
+            logging.warning("ACE Manager: Device mapper not available, cannot persist order changes")
+
+        return {
+            'status': 'success',
+            'message': 'Gate assignments updated. Restart Klipper to apply changes.',
+            'restart_required': True
+        }
+
+    cmd_ACE_GET_STATUS_help = 'Get unified status from all ACE devices'
+
+    def cmd_ACE_GET_STATUS(self, gcmd):
+        """Display aggregated status from all ACE units"""
+        self.gcode.respond_info('=== ACE Manager Status ===')
+        self.gcode.respond_info(f'Total Gates: {self.total_gates}')
+        self.gcode.respond_info(f'ACE Devices: {len(self.ace_devices)}')
+
+        all_slots = []
+        for device in self.ace_devices:
+            ace = device['instance']
+            offset = device['gate_offset']
+
+            self.gcode.respond_info(f"\n--- {device['name']} (gates {offset}-{offset+3}) ---")
+
+            # Get status from this ACE
+            status = ace.get_status()
+
+            # Display this ACE's slots with global gate numbers
+            for i, slot_status in enumerate(status['active_gate']):
+                global_gate = offset + i
+                material = status['gate_material'][i] if i < len(status['gate_material']) else ''
+                color = status['gate_color'][i] if i < len(status['gate_color']) else 'FFFFFF'
+
+                self.gcode.respond_info(
+                    f"  Gate {global_gate}: {slot_status} | Type: {material} | Color: {color}"
+                )
+
+    cmd_ACE_FEED_help = 'Feed filament (unified across all ACE devices)'
+
+    def cmd_ACE_FEED(self, gcmd):
+        """Unified feed command"""
+        gate = gcmd.get_int('INDEX')
+        ace_instance, local_gate = self._route_to_ace(gate)
+
+        # Create modified gcmd with local gate
+        length = gcmd.get_int('LENGTH')
+        speed = gcmd.get_int('SPEED', ace_instance.feed_speed)
+
+        ace_instance._feed(local_gate, length, speed)
+
+    cmd_ACE_RETRACT_help = 'Retract filament (unified across all ACE devices)'
+
+    def cmd_ACE_RETRACT(self, gcmd):
+        """Unified retract command"""
+        gate = gcmd.get_int('INDEX')
+        ace_instance, local_gate = self._route_to_ace(gate)
+
+        length = gcmd.get_int('LENGTH')
+        speed = gcmd.get_int('SPEED', ace_instance.retract_speed)
+
+        ace_instance._retract(local_gate, length, speed)
+
+    cmd_ACE_GATE_MAP_help = 'Set gate info (unified across all ACE devices)'
+
+    def cmd_ACE_GATE_MAP(self, gcmd):
+        """Unified gate mapping"""
+        gate = gcmd.get_int('GATE')
+        ace_instance, local_gate = self._route_to_ace(gate)
+
+        # Forward to ACE with local gate number
+        # This needs more work to properly handle the gate parameter
+        color = gcmd.get('COLOR', None)
+        type_param = gcmd.get('TYPE', None)
+        temp = gcmd.get_int('TEMP', None)
+
+        if color:
+            ace_instance.save_variables.allVariables.setdefault('ace_gate_color', ['FFFFFF'] * ace_instance.num_gates)[local_gate] = color
+        if type_param:
+            ace_instance.save_variables.allVariables.setdefault('ace_gate_type', [''] * ace_instance.num_gates)[local_gate] = type_param
+        if temp:
+            ace_instance.save_variables.allVariables.setdefault('ace_gate_temp', [230] * ace_instance.num_gates)[local_gate] = temp
+
+        if color or type_param or temp:
+            ace_instance.write_variables()
+
+    cmd_ACE_SCAN_DEVICES_help = 'Scan for ACE devices and report findings'
+
+    def cmd_ACE_SCAN_DEVICES(self, gcmd):
+        """Scan for ACE devices and report findings"""
+        self.gcode.respond_info('=== ACE Device Scan ===')
+        self.gcode.respond_info('Scanning for ACE devices...')
+
+        result = self.scan_devices(rescan=True, update_map=True)
+
+        self.gcode.respond_info(f"Found {result['devices_found']} ACE devices")
+        self.gcode.respond_info(f"New devices: {result['new_devices']}")
+
+        if result['new_device_list']:
+            self.gcode.respond_info('\nNew devices detected:')
+            for dev in result['new_device_list']:
+                self.gcode.respond_info(
+                    f"  {dev['device_id']}: {dev['model']} v{dev['firmware']} @ {dev['port']}"
+                )
+
+        self.gcode.respond_info('\nAll devices:')
+        for dev in result['devices']['devices']:
+            gates_str = f"{dev['gates'][0]}-{dev['gates'][-1]}"
+            self.gcode.respond_info(
+                f"  {dev['name']}: {dev['model']} @ {dev['port']} (Gates {gates_str})"
+            )
+
+    cmd_ACE_LIST_DEVICES_help = 'List all ACE devices with status'
+
+    def cmd_ACE_LIST_DEVICES(self, gcmd):
+        """List all ACE devices"""
+        devices = self.get_device_list()
+
+        self.gcode.respond_info(f"=== ACE Devices ({devices['total_gates']} gates) ===")
+        self.gcode.respond_info(f"Auto-detect: {'enabled' if devices['auto_detect_enabled'] else 'disabled'}")
+
+        for dev in devices['devices']:
+            status_icon = "✓" if dev['connection_status'] == 'connected' else "✗"
+            gates_str = f"{dev['gates'][0]}-{dev['gates'][-1]}"
+
+            self.gcode.respond_info(f"\n{status_icon} {dev['name']}: {dev['model']} v{dev['firmware']}")
+            self.gcode.respond_info(f"   Port: {dev['port']}")
+            self.gcode.respond_info(f"   Gates: {gates_str}")
+            self.gcode.respond_info(f"   Status: {dev['connection_status']}")
+
+            # Show health metrics if available
+            health = dev.get('health', {})
+            if health.get('uptime'):
+                uptime_hours = health['uptime'] // 3600
+                uptime_mins = (health['uptime'] % 3600) // 60
+                self.gcode.respond_info(f"   Uptime: {uptime_hours}h {uptime_mins}m")
+            if health.get('error_count') is not None:
+                self.gcode.respond_info(f"   Errors: {health['error_count']}")
+
+    cmd_ACE_REORDER_DEVICES_help = 'Reorder ACE device gate assignments'
+
+    def cmd_ACE_REORDER_DEVICES(self, gcmd):
+        """Reorder ACE device gate assignments (for Moonraker API)"""
+        # Get the ORDER parameter (JSON string)
+        order_str = gcmd.get('ORDER', None)
+
+        if not order_str:
+            self.gcode.respond_info('Error: ORDER parameter required')
+            self.gcode.respond_info('Usage: ACE_REORDER_DEVICES ORDER=\'[{"device_id": "...", "gate_offset": 0}, ...]\'')
+            return
+
+        try:
+            import json
+            device_order = json.loads(order_str)
+
+            # Call the reorder_gates method
+            result = self.reorder_gates(device_order)
+
+            self.gcode.respond_info('=== ACE Device Reorder ===')
+            self.gcode.respond_info(f"Status: {result['status']}")
+            self.gcode.respond_info(f"Message: {result['message']}")
+
+            if result.get('restart_required'):
+                self.gcode.respond_info('IMPORTANT: Restart Klipper to apply changes')
+                self.gcode.respond_info('Run: FIRMWARE_RESTART')
+
+        except json.JSONDecodeError as e:
+            self.gcode.respond_info(f'Error: Invalid JSON in ORDER parameter: {e}')
+        except Exception as e:
+            self.gcode.respond_info(f'Error reordering devices: {e}')
+
 def load_config(config):
+    """Load single ACE or ACE Manager based on config parameters"""
+    # Check if this is an ACE Manager config by looking for manager-specific params
+    has_serial_ports = config.fileconfig.has_option(config.get_name(), 'serial_ports')
+    has_ace_devices = config.fileconfig.has_option(config.get_name(), 'ace_devices')
+    has_auto_detect = config.fileconfig.has_option(config.get_name(), 'auto_detect')
+
+    # If any manager-specific param exists, load as AceManager
+    if has_serial_ports or has_ace_devices or has_auto_detect:
+        return AceManager(config)
+
+    # Otherwise load as single BunnyAce
+    return BunnyAce(config)
+
+def load_config_prefix(config):
+    """Load ACE instances with custom names like [ace ace1]"""
     return BunnyAce(config)
 
