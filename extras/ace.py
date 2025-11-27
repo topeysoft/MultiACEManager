@@ -191,6 +191,30 @@ class AceDeviceDiscovery:
     ACE_PRODUCT_NAME = "ACE"
 
     @staticmethod
+    def sanitize_device_id(device_id):
+        """
+        Sanitize device_id to create a valid Python identifier for use in save_variables.
+
+        Replaces all non-alphanumeric characters (except underscores) with underscores.
+        This ensures device IDs can be safely used as Python variable names.
+
+        Args:
+            device_id: Raw device identifier (e.g., 'hub_1_port_1.3.3.3:1.0')
+
+        Returns:
+            Sanitized device ID safe for use as Python variable name
+            (e.g., 'hub_1_port_1_3_3_3_1_0')
+
+        Examples:
+            >>> sanitize_device_id('hub_1_port_1.3.3.3:1.0')
+            'hub_1_port_1_3_3_3_1_0'
+            >>> sanitize_device_id('mac:AA:BB:CC:DD:EE:FF')
+            'mac_AA_BB_CC_DD_EE_FF'
+        """
+        import re
+        return re.sub(r'[^a-zA-Z0-9_]', '_', device_id)
+
+    @staticmethod
     def find_ace_devices():
         """
         Scan all USB serial ports and identify ACE devices
@@ -375,23 +399,26 @@ class AceDeviceDiscovery:
             parts = usb_loc.split('-')
             if len(parts) >= 2:
                 # Get the port path (everything after the bus number)
-                port_path = parts[1].replace('.', '_')
-                return f"hub_{parts[0]}_port_{port_path}"
+                port_path = parts[1]
+                device_id = f"hub_{parts[0]}_port_{port_path}"
             else:
                 # Fallback for simple format
-                usb_loc_clean = usb_loc.replace('.', '_').replace('-', '_')
-                return f"usb_{usb_loc_clean}"
+                device_id = f"usb_{usb_loc}"
+
+            # Sanitize to ensure valid Python identifier
+            return AceDeviceDiscovery.sanitize_device_id(device_id)
 
         # Fallback: MAC address (if firmware provides it)
         if 'mac_address' in device_info and device_info['mac_address']:
-            mac = device_info['mac_address'].replace(':', '')
+            mac = device_info['mac_address']
             logging.info(f"ACE: Using MAC address for device_id (USB location not available)")
-            return f"mac_{mac}"
+            return AceDeviceDiscovery.sanitize_device_id(f"mac_{mac}")
 
         # Fallback: Serial number (if firmware provides it)
         if 'serial_number' in device_info and device_info['serial_number']:
+            sn = device_info['serial_number']
             logging.info(f"ACE: Using serial number for device_id (USB location not available)")
-            return f"sn_{device_info['serial_number']}"
+            return AceDeviceDiscovery.sanitize_device_id(f"sn_{sn}")
 
         # Last resort: Hash of firmware + model (NOT recommended - not unique across identical devices)
         unique_str = f"{device_info.get('model', '')}_{device_info.get('firmware', '')}"
@@ -1520,7 +1547,7 @@ class BunnyAce:
             # Otherwise use shared variable names (single device mode)
             if hasattr(self, 'device_id') and self.device_id:
                 # Sanitize device_id to ensure valid Python variable name
-                safe_id = self.device_id.replace('-', '_').replace('.', '_')
+                safe_id = AceDeviceDiscovery.sanitize_device_id(self.device_id)
                 color_var = f'ace_color_{safe_id}'
                 type_var = f'ace_type_{safe_id}'
                 temp_var = f'ace_temp_{safe_id}'
@@ -1624,7 +1651,7 @@ class BunnyAce:
         # Otherwise fall back to shared variable names (single device mode)
         if hasattr(self, 'device_id') and self.device_id:
             # Sanitize device_id to ensure valid Python variable name
-            safe_id = self.device_id.replace('-', '_').replace('.', '_')
+            safe_id = AceDeviceDiscovery.sanitize_device_id(self.device_id)
             color_var = f'ace_color_{safe_id}'
             type_var = f'ace_type_{safe_id}'
             temp_var = f'ace_temp_{safe_id}'
@@ -2162,7 +2189,7 @@ class AceManager:
                 if hasattr(ace_instance, 'save_variables'):
                     # Try device-specific variables first, fall back to shared variables
                     # Sanitize device_id to ensure valid Python variable name
-                    safe_id = device_id.replace('-', '_').replace('.', '_')
+                    safe_id = AceDeviceDiscovery.sanitize_device_id(device_id)
                     color_var = f'ace_color_{safe_id}'
                     type_var = f'ace_type_{safe_id}'
                     temp_var = f'ace_temp_{safe_id}'
@@ -2190,7 +2217,7 @@ class AceManager:
             if hasattr(ace_instance, 'save_variables'):
                 # Use device-specific variable names
                 # Sanitize device_id to ensure valid Python variable name
-                safe_id = device_id.replace('-', '_').replace('.', '_')
+                safe_id = AceDeviceDiscovery.sanitize_device_id(device_id)
                 color_var = f'ace_color_{safe_id}'
                 type_var = f'ace_type_{safe_id}'
                 temp_var = f'ace_temp_{safe_id}'
@@ -3212,7 +3239,7 @@ class AceManager:
             if hasattr(ace_instance, 'save_variables'):
                 # Use device-specific variable names: ace_color_{device_id}
                 # Sanitize device_id to ensure valid Python variable name
-                safe_id = device_id.replace('-', '_').replace('.', '_')
+                safe_id = AceDeviceDiscovery.sanitize_device_id(device_id)
                 color_var = f'ace_color_{safe_id}'
                 type_var = f'ace_type_{safe_id}'
                 temp_var = f'ace_temp_{safe_id}'
