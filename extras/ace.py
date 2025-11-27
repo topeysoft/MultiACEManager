@@ -1515,18 +1515,30 @@ class BunnyAce:
             if not color and not type and not temp:
                 gcmd.respond_info('ACE: Bad params')
                 return
+
+            # Use device-specific variable names if device_id is set (multi-device mode)
+            # Otherwise use shared variable names (single device mode)
+            if hasattr(self, 'device_id') and self.device_id:
+                color_var = f'ace_gate_color_{self.device_id}'
+                type_var = f'ace_gate_type_{self.device_id}'
+                temp_var = f'ace_gate_temp_{self.device_id}'
+            else:
+                color_var = 'ace_gate_color'
+                type_var = 'ace_gate_type'
+                temp_var = 'ace_gate_temp'
+
             if color is not None:
-                if 'ace_gate_color' not in self.save_variables.allVariables:
-                    self.save_variables.allVariables['ace_gate_color'] = ['FFFFFF', 'FFFFFF', 'FFFFFF', 'FFFFFF']
-                self.save_variables.allVariables['ace_gate_color'][gate] = color
+                if color_var not in self.save_variables.allVariables:
+                    self.save_variables.allVariables[color_var] = ['FFFFFF', 'FFFFFF', 'FFFFFF', 'FFFFFF']
+                self.save_variables.allVariables[color_var][gate] = color
             if type is not None:
-                if 'ace_gate_type' not in self.save_variables.allVariables:
-                    self.save_variables.allVariables['ace_gate_type'] = ['', '', '', '']
-                self.save_variables.allVariables['ace_gate_type'][gate] = type
+                if type_var not in self.save_variables.allVariables:
+                    self.save_variables.allVariables[type_var] = ['', '', '', '']
+                self.save_variables.allVariables[type_var][gate] = type
             if temp is not None:
-                if 'ace_gate_temp' not in self.save_variables.allVariables:
-                    self.save_variables.allVariables['ace_gate_temp'] = [0, 0, 0, 0]
-                self.save_variables.allVariables['ace_gate_temp'][gate] = temp
+                if temp_var not in self.save_variables.allVariables:
+                    self.save_variables.allVariables[temp_var] = [0, 0, 0, 0]
+                self.save_variables.allVariables[temp_var][gate] = temp
             self.write_variables()
         else:
             gcmd.respond_info('ACE_MAP' + str(gate))
@@ -1606,10 +1618,21 @@ class BunnyAce:
         default_temps = [230] * self.num_gates
         default_spool_ids = list(range(1, self.num_gates + 1))
 
+        # Use device-specific variable names if device_id is set (multi-device mode)
+        # Otherwise fall back to shared variable names (single device mode)
+        if hasattr(self, 'device_id') and self.device_id:
+            color_var = f'ace_gate_color_{self.device_id}'
+            type_var = f'ace_gate_type_{self.device_id}'
+            temp_var = f'ace_gate_temp_{self.device_id}'
+        else:
+            color_var = 'ace_gate_color'
+            type_var = 'ace_gate_type'
+            temp_var = 'ace_gate_temp'
+
         # Get saved variables and expand if needed
-        gate_colors = list(self.save_variables.allVariables.get('ace_gate_color', default_colors))
-        gate_types = list(self.save_variables.allVariables.get('ace_gate_type', default_types))
-        gate_temps = list(self.save_variables.allVariables.get('ace_gate_temp', default_temps))
+        gate_colors = list(self.save_variables.allVariables.get(color_var, default_colors))
+        gate_types = list(self.save_variables.allVariables.get(type_var, default_types))
+        gate_temps = list(self.save_variables.allVariables.get(temp_var, default_temps))
 
         # Extend arrays if more gates detected than previously saved
         while len(gate_colors) < self.num_gates:
@@ -1620,12 +1643,12 @@ class BunnyAce:
             gate_temps.append(230)
 
         # Update saved variables if they were expanded
-        if len(gate_colors) != len(self.save_variables.allVariables.get('ace_gate_color', [])):
-            self.save_variable('ace_gate_color', gate_colors, True)
-        if len(gate_types) != len(self.save_variables.allVariables.get('ace_gate_type', [])):
-            self.save_variable('ace_gate_type', gate_types, True)
-        if len(gate_temps) != len(self.save_variables.allVariables.get('ace_gate_temp', [])):
-            self.save_variable('ace_gate_temp', gate_temps, True)
+        if len(gate_colors) != len(self.save_variables.allVariables.get(color_var, [])):
+            self.save_variable(color_var, gate_colors, True)
+        if len(gate_types) != len(self.save_variables.allVariables.get(type_var, [])):
+            self.save_variable(type_var, gate_types, True)
+        if len(gate_temps) != len(self.save_variables.allVariables.get(temp_var, [])):
+            self.save_variable(temp_var, gate_temps, True)
 
         return {
             'status': self._info['status'],
@@ -1969,6 +1992,9 @@ class AceManager:
             # Get device_id from device_ids mapping, or generate fallback
             device_id = self.device_ids.get(port, f"port_{i}")  # Fallback for non-auto-detect
 
+            # Set device_id on the ACE instance for device-specific variable names
+            ace_instance.device_id = device_id
+
             # Store device info
             self.ace_devices.append({
                 'name': ace_name,
@@ -2131,9 +2157,17 @@ class AceManager:
                 # No stored properties, initialize default properties from current ACE state
                 # and save them for future reference
                 if hasattr(ace_instance, 'save_variables'):
-                    current_colors = ace_instance.save_variables.allVariables.get('ace_gate_color', [])
-                    current_materials = ace_instance.save_variables.allVariables.get('ace_gate_type', [])
-                    current_temps = ace_instance.save_variables.allVariables.get('ace_gate_temp', [])
+                    # Try device-specific variables first, fall back to shared variables
+                    color_var = f'ace_gate_color_{device_id}'
+                    type_var = f'ace_gate_type_{device_id}'
+                    temp_var = f'ace_gate_temp_{device_id}'
+
+                    current_colors = ace_instance.save_variables.allVariables.get(color_var,
+                                    ace_instance.save_variables.allVariables.get('ace_gate_color', []))
+                    current_materials = ace_instance.save_variables.allVariables.get(type_var,
+                                       ace_instance.save_variables.allVariables.get('ace_gate_type', []))
+                    current_temps = ace_instance.save_variables.allVariables.get(temp_var,
+                                   ace_instance.save_variables.allVariables.get('ace_gate_temp', []))
 
                     if current_colors or current_materials or current_temps:
                         device_props = {
@@ -2145,19 +2179,25 @@ class AceManager:
                         logging.info(f"ACE Manager: Initialized properties for device {device_id}")
                 continue
 
-            # Apply stored properties to ACE instance
+            # Apply stored properties to ACE instance using device-specific variable names
+            # This prevents cross-contamination when multiple devices share the same save_variables object
             # Note: Properties are stored per-device (4 gates), not per global gate offset
             if hasattr(ace_instance, 'save_variables'):
+                # Use device-specific variable names
+                color_var = f'ace_gate_color_{device_id}'
+                type_var = f'ace_gate_type_{device_id}'
+                temp_var = f'ace_gate_temp_{device_id}'
+
                 if 'gate_colors' in device_props and device_props['gate_colors']:
-                    ace_instance.save_variables.allVariables['ace_gate_color'] = device_props['gate_colors']
+                    ace_instance.save_variables.allVariables[color_var] = device_props['gate_colors']
                     logging.info(f"ACE Manager: Restored gate colors for device {device_id}")
 
                 if 'gate_materials' in device_props and device_props['gate_materials']:
-                    ace_instance.save_variables.allVariables['ace_gate_type'] = device_props['gate_materials']
+                    ace_instance.save_variables.allVariables[type_var] = device_props['gate_materials']
                     logging.info(f"ACE Manager: Restored gate materials for device {device_id}")
 
                 if 'gate_temps' in device_props and device_props['gate_temps']:
-                    ace_instance.save_variables.allVariables['ace_gate_temp'] = device_props['gate_temps']
+                    ace_instance.save_variables.allVariables[temp_var] = device_props['gate_temps']
                     logging.info(f"ACE Manager: Restored gate temperatures for device {device_id}")
 
                 # Also update the gate colors/materials on the ACE device itself
@@ -2939,6 +2979,9 @@ class AceManager:
                 config_wrapper = AceConfigWrapper(self.printer, f"ace {ace_name}", ace_config, None)
                 ace_instance = BunnyAce(config_wrapper)
 
+                # Set device_id on the ACE instance for device-specific variable names
+                ace_instance.device_id = device_id
+
                 # Store device info
                 self.ace_devices.append({
                     'name': ace_name,
@@ -3157,16 +3200,31 @@ class AceManager:
             self.device_mapper.update_device_properties(device_id, device_props)
             self.device_mapper.save()
 
-            # Also update the ACE instance's in-memory state
-            if color and hasattr(ace_instance, 'save_variables'):
-                ace_instance.save_variables.allVariables.setdefault('ace_gate_color', ['FFFFFF'] * 4)[local_gate] = color
-            if type_param and hasattr(ace_instance, 'save_variables'):
-                ace_instance.save_variables.allVariables.setdefault('ace_gate_type', [''] * 4)[local_gate] = type_param
-            if temp and hasattr(ace_instance, 'save_variables'):
-                ace_instance.save_variables.allVariables.setdefault('ace_gate_temp', [230] * 4)[local_gate] = temp
+            # Also update the ACE instance's in-memory state using device-specific variable names
+            # This prevents cross-contamination when multiple devices share the same save_variables object
+            if hasattr(ace_instance, 'save_variables'):
+                # Use device-specific variable names: ace_gate_color_{device_id}
+                color_var = f'ace_gate_color_{device_id}'
+                type_var = f'ace_gate_type_{device_id}'
+                temp_var = f'ace_gate_temp_{device_id}'
 
-            if (color or type_param or temp) and hasattr(ace_instance, 'write_variables'):
-                ace_instance.write_variables()
+                if color:
+                    if color_var not in ace_instance.save_variables.allVariables:
+                        ace_instance.save_variables.allVariables[color_var] = ['FFFFFF'] * 4
+                    ace_instance.save_variables.allVariables[color_var][local_gate] = color
+
+                if type_param:
+                    if type_var not in ace_instance.save_variables.allVariables:
+                        ace_instance.save_variables.allVariables[type_var] = [''] * 4
+                    ace_instance.save_variables.allVariables[type_var][local_gate] = type_param
+
+                if temp:
+                    if temp_var not in ace_instance.save_variables.allVariables:
+                        ace_instance.save_variables.allVariables[temp_var] = [230] * 4
+                    ace_instance.save_variables.allVariables[temp_var][local_gate] = temp
+
+                if (color or type_param or temp) and hasattr(ace_instance, 'write_variables'):
+                    ace_instance.write_variables()
 
             logging.info(f"ACE Manager: Updated gate {gate} on device {device_id} (local gate {local_gate})")
         else:
