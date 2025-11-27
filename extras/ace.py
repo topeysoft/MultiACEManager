@@ -257,6 +257,7 @@ class AceDeviceDiscovery:
             usb_location: USB bus-port location (e.g., "1-1.2") for device_id fallback
         Returns: Device info dict or None if not ACE
         """
+        logging.info(f"ACE Probe: Attempting to probe {port} at {baud} baud...")
         try:
             ser = serial.Serial(
                 port=port,
@@ -264,6 +265,7 @@ class AceDeviceDiscovery:
                 timeout=timeout,
                 write_timeout=timeout
             )
+            logging.info(f"ACE Probe: Serial port {port} opened successfully")
 
             # Send get_info request using ACE protocol
             request = {"id": 1, "method": "get_info"}
@@ -285,21 +287,30 @@ class AceDeviceDiscovery:
             data += struct.pack('@H', crc_value)
             data += bytes([PROTOCOL_TAIL_BYTE])
 
+            logging.info(f"ACE Probe: Sending get_info command to {port}...")
             ser.write(data)
             time.sleep(0.5)  # Wait for response
 
             # Try to read response
-            if ser.in_waiting > 0:
-                response_data = ser.read(ser.in_waiting)
+            bytes_waiting = ser.in_waiting
+            logging.info(f"ACE Probe: {bytes_waiting} bytes waiting in buffer")
+
+            if bytes_waiting > 0:
+                response_data = ser.read(bytes_waiting)
+                logging.info(f"ACE Probe: Received {len(response_data)} bytes: {response_data.hex()[:100]}...")
 
                 # Parse response
                 if len(response_data) >= PROTOCOL_MIN_PACKET_SIZE and response_data[0:2] == PROTOCOL_HEAD_BYTES:
                     payload_len = struct.unpack('<H', response_data[2:4])[0]
+                    logging.info(f"ACE Probe: Valid protocol header, payload length: {payload_len}")
+
                     if len(response_data) >= 4 + payload_len:
                         response_payload = response_data[4:4 + payload_len]
 
                         try:
                             response_json = json.loads(response_payload.decode('utf-8'))
+                            logging.info(f"ACE Probe: Parsed JSON response: {response_json}")
+
                             if 'result' in response_json:
                                 result = response_json['result']
                                 # Add USB location to result for device_id generation
@@ -307,6 +318,7 @@ class AceDeviceDiscovery:
                                     result['usb_location'] = usb_location
                                 device_id = AceDeviceDiscovery._generate_device_id(result)
 
+                                logging.info(f"ACE Probe: ✓ Successfully verified ACE device '{device_id}' at {port}")
                                 ser.close()
                                 return {
                                     'device_id': device_id,
@@ -316,14 +328,29 @@ class AceDeviceDiscovery:
                                     'mac_address': result.get('mac_address', None),
                                     'num_gates': 4  # Default, can be detected from slots
                                 }
-                        except (json.JSONDecodeError, UnicodeDecodeError):
-                            pass
+                            else:
+                                logging.warning(f"ACE Probe: Response missing 'result' field: {response_json}")
+                        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                            logging.warning(f"ACE Probe: Failed to decode JSON response: {e}")
+                            logging.warning(f"ACE Probe: Raw payload: {response_payload}")
+                    else:
+                        logging.warning(f"ACE Probe: Incomplete response - expected {4 + payload_len} bytes, got {len(response_data)}")
+                else:
+                    logging.warning(f"ACE Probe: Invalid protocol header or packet too small ({len(response_data)} bytes)")
+            else:
+                logging.warning(f"ACE Probe: No response received from {port} (timeout after {timeout}s)")
 
             ser.close()
+            logging.info(f"ACE Probe: ✗ Device at {port} did not respond as expected ACE device")
             return None
 
+        except serial.SerialException as e:
+            logging.warning(f"ACE Probe: Serial error on {port}: {e}")
+            return None
         except Exception as e:
-            logging.warning(f"Failed to probe {port}: {e}")
+            logging.error(f"ACE Probe: Unexpected error probing {port}: {e}")
+            import traceback
+            logging.error(traceback.format_exc())
             return None
 
     @staticmethod
@@ -2594,6 +2621,7 @@ class AceManager:
                 logging.info(f"ACE Manager: Using existing device {device_id} at {port}")
             else:
                 # New device - probe it
+                logging.info(f"ACE Manager: Probing new device at {port}...")
                 try:
                     probe_result = AceDeviceDiscovery.probe_ace_device(port, baud=self.baud, usb_location=usb_location)
                     if probe_result:
@@ -2609,9 +2637,13 @@ class AceManager:
                             'probe_result': probe_result,
                             'existing': False
                         })
-                        logging.info(f"ACE Manager: Verified new device {device_id} at {port}")
+                        logging.info(f"ACE Manager: ✓ Verified new device {device_id} at {port}")
+                    else:
+                        logging.warning(f"ACE Manager: ✗ Probe failed for {port} - device did not respond or is not an ACE device")
                 except Exception as e:
-                    logging.error(f"ACE Manager: Failed to probe device at {port}: {e}")
+                    logging.error(f"ACE Manager: ✗ Failed to probe device at {port}: {e}")
+                    import traceback
+                    logging.error(traceback.format_exc())
 
         if not verified_devices:
             logging.error("ACE Manager: No ACE devices could be verified")
