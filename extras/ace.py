@@ -1689,22 +1689,21 @@ class AceManager:
         ace_devices_str = config.get('ace_devices', None)
         auto_detect = config.getboolean('auto_detect', False)
 
-        # Pre-read all possible config parameters to make them "valid" in Klipper's eyes
-        # This prevents "Option X is not valid" errors during config validation
-        # We don't use these values here, but reading them registers them as valid options
+        # Read and store all possible config parameters
+        # These are used when creating ACE instances (both at startup and during hot-reload)
         self.baud = config.getint('baud', 115200)
-        config.get('extruder_sensor_pin', None)
-        config.get('toolhead_sensor_pin', None)
-        config.getint('extruder_move_speed', 10)
-        config.getint('toolhead_homing_speed', 20)
-        config.getint('feed_speed', 80)
-        config.getint('retract_speed', 80)
-        config.getint('toolchange_retract_length', 170)
-        config.getint('toolchange_feed_length', 800)
-        config.getint('toolhead_sensor_to_nozzle', 40)
-        config.get('poop_macros', '_POOP')
-        config.get('cut_macros', '_CUT_TIP')
-        config.getint('max_dryer_temperature', 70)
+        self.extruder_sensor_pin = config.get('extruder_sensor_pin', None)
+        self.toolhead_sensor_pin = config.get('toolhead_sensor_pin', None)
+        self.extruder_move_speed = config.getint('extruder_move_speed', 10)
+        self.toolhead_homing_speed = config.getint('toolhead_homing_speed', 20)
+        self.feed_speed = config.getint('feed_speed', 80)
+        self.retract_speed = config.getint('retract_speed', 80)
+        self.toolchange_retract_length = config.getint('toolchange_retract_length', 170)
+        self.toolchange_feed_length = config.getint('toolchange_feed_length', 800)
+        self.toolhead_sensor_to_nozzle = config.getint('toolhead_sensor_to_nozzle', 40)
+        self.poop_macros = config.get('poop_macros', '_POOP')
+        self.cut_macros = config.get('cut_macros', '_CUT_TIP')
+        self.max_dryer_temperature = config.getint('max_dryer_temperature', 70)
 
         if serial_ports_str:
             # Method 1: Direct serial ports (recommended)
