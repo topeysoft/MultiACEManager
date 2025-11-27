@@ -2001,15 +2001,34 @@ class AceManager:
         tool = gcmd.get_int('TOOL')
 
         if tool == -1:
-            # Unload - use current tool to determine which ACE
-            # For now, try all ACEs (they'll ignore if not loaded)
-            for device in self.ace_devices:
-                try:
-                    device['instance'].cmd_ACE_CHANGE_TOOL(gcmd)
-                except:
-                    pass
+            # Unload - determine which ACE has the loaded filament
+            first_ace = self.ace_devices[0]['instance'] if self.ace_devices else None
+            if first_ace:
+                selected_gate = int(first_ace.save_variables.allVariables.get('ace_current_index', -1))
+
+                if selected_gate >= 0:
+                    # Route to the ACE that owns this gate
+                    try:
+                        ace_instance, local_tool = self._route_to_ace(selected_gate)
+
+                        # Create gcmd with local unload (-1) but route to correct device
+                        import types
+                        local_gcmd = types.SimpleNamespace()
+                        local_gcmd.get_int = lambda key, default=None: -1 if key == 'TOOL' else default
+                        local_gcmd.error = gcmd.error
+
+                        logging.info(f"ACE Manager: Routing unload command to device at gate offset {ace_instance.gate_offset}")
+                        ace_instance.cmd_ACE_CHANGE_TOOL(local_gcmd)
+                    except Exception as e:
+                        self.gcode.respond_info(f"Error routing unload command: {e}")
+                        logging.error(f"ACE Manager: Error routing unload: {e}")
+                else:
+                    # No tool loaded, nothing to unload
+                    self.gcode.respond_info("No tool currently loaded")
+                    logging.info("ACE Manager: Unload requested but no tool is loaded")
             return
 
+        # Normal tool change - route to correct ACE
         ace_instance, local_tool = self._route_to_ace(tool)
 
         # Create new gcmd with local tool number
@@ -2018,6 +2037,7 @@ class AceManager:
         local_gcmd.get_int = lambda key, default=None: local_tool if key == 'TOOL' else default
         local_gcmd.error = gcmd.error
 
+        logging.info(f"ACE Manager: Routing tool change T{tool} to device at gate offset {ace_instance.gate_offset} (local T{local_tool})")
         ace_instance.cmd_ACE_CHANGE_TOOL(local_gcmd)
 
     def get_status(self, eventtime=None):
