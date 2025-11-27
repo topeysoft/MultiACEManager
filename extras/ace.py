@@ -452,9 +452,11 @@ class AceDeviceMapper:
 
         # Load device metadata from main section (backward compatible)
         if parser.has_section('ace_device_map'):
-            for device_id, value in parser.items('ace_device_map'):
-                if device_id.startswith('#'):
+            for device_id_raw, value in parser.items('ace_device_map'):
+                if device_id_raw.startswith('#'):
                     continue
+                # Sanitize device_id when loading (handles migration from old unsanitized IDs)
+                device_id = AceDeviceDiscovery.sanitize_device_id(device_id_raw)
                 parts = [p.strip() for p in value.split(',')]
                 if len(parts) >= 2:
                     self.device_map[device_id] = {
@@ -468,7 +470,9 @@ class AceDeviceMapper:
         # Load device-specific properties from individual sections
         for section in parser.sections():
             if section.startswith('device:'):
-                device_id = section[7:]  # Remove 'device:' prefix
+                device_id_raw = section[7:]  # Remove 'device:' prefix
+                # Sanitize device_id when loading (handles migration from old unsanitized IDs)
+                device_id = AceDeviceDiscovery.sanitize_device_id(device_id_raw)
                 if device_id not in self.device_map:
                     self.device_map[device_id] = {
                         'port': '',
@@ -500,13 +504,17 @@ class AceDeviceMapper:
         # Save main device mapping section
         parser.add_section('ace_device_map')
         for device_id, info in sorted(self.device_map.items()):
+            # Sanitize device_id for use as config option name
+            safe_id = AceDeviceDiscovery.sanitize_device_id(device_id)
             value = f"{info['port']}, {info['last_gate_offset']}, {int(time.time())}, {info.get('usb_location', '')}"
-            parser.set('ace_device_map', device_id, value)
+            parser.set('ace_device_map', safe_id, value)
 
         # Save device-specific properties in separate sections
         for device_id, info in sorted(self.device_map.items()):
             if info.get('properties'):
-                section_name = f'device:{device_id}'
+                # Sanitize device_id for use as section name
+                safe_id = AceDeviceDiscovery.sanitize_device_id(device_id)
+                section_name = f'device:{safe_id}'
                 parser.add_section(section_name)
                 for prop_key, prop_value in info['properties'].items():
                     # Serialize lists/dicts as JSON
