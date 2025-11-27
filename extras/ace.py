@@ -199,9 +199,20 @@ class AceDeviceDiscovery:
         ace_devices = []
         ports = serial.tools.list_ports.comports()
 
+        logging.info(f"ACE Device Discovery: Scanning {len(ports)} USB serial ports...")
+
         for port in ports:
+            # Log all ports for debugging
+            logging.info(f"  Port: {port.device}")
+            logging.info(f"    VID:PID = 0x{port.vid:04X}:0x{port.pid:04X}" if port.vid and port.pid else f"    VID:PID = None")
+            logging.info(f"    Manufacturer: {port.manufacturer}")
+            logging.info(f"    Product: {port.product}")
+            logging.info(f"    Serial: {port.serial_number}")
+            logging.info(f"    Location: {port.location}")
+
             # Method 1: VID/PID matching (most reliable)
             if port.vid == AceDeviceDiscovery.ACE_VID:
+                logging.info(f"    ✓ Matched by VID (0x{AceDeviceDiscovery.ACE_VID:04X})")
                 ace_devices.append({
                     'port': port.device,
                     'hwid': port.hwid,
@@ -215,6 +226,7 @@ class AceDeviceDiscovery:
             # Method 2: Manufacturer/Product string matching (fallback)
             elif (port.manufacturer and AceDeviceDiscovery.ACE_MANUFACTURER.upper() in str(port.manufacturer).upper()) or \
                  (port.product and AceDeviceDiscovery.ACE_PRODUCT_NAME.upper() in str(port.product).upper()):
+                logging.info(f"    ✓ Matched by manufacturer/product string")
                 ace_devices.append({
                     'port': port.device,
                     'hwid': port.hwid,
@@ -225,10 +237,13 @@ class AceDeviceDiscovery:
                     'pid': port.pid,
                     'location': port.location
                 })
+            else:
+                logging.info(f"    ✗ No match (looking for VID=0x{AceDeviceDiscovery.ACE_VID:04X} or mfr='{AceDeviceDiscovery.ACE_MANUFACTURER}' or product='{AceDeviceDiscovery.ACE_PRODUCT_NAME}')")
 
         # Sort by USB location for deterministic ordering
         ace_devices.sort(key=lambda x: x.get('location', '') or '')
 
+        logging.info(f"ACE Device Discovery: Found {len(ace_devices)} ACE devices")
         return ace_devices
 
     @staticmethod
@@ -1685,6 +1700,9 @@ class AceManager:
         self.gcode.register_command(
             'ACE_LIST_DEVICES', self.cmd_ACE_LIST_DEVICES,
             desc=self.cmd_ACE_LIST_DEVICES_help)
+        self.gcode.register_command(
+            'ACE_DEBUG_USB_PORTS', self.cmd_ACE_DEBUG_USB_PORTS,
+            desc=self.cmd_ACE_DEBUG_USB_PORTS_help)
         self.gcode.register_command(
             'ACE_SHOW_USB_INFO', self.cmd_ACE_SHOW_USB_INFO,
             desc=self.cmd_ACE_SHOW_USB_INFO_help)
@@ -3299,6 +3317,73 @@ class AceManager:
                 self.gcode.respond_info(f"   Uptime: {uptime_hours}h {uptime_mins}m")
             if health.get('error_count') is not None:
                 self.gcode.respond_info(f"   Errors: {health['error_count']}")
+
+    cmd_ACE_DEBUG_USB_PORTS_help = 'Debug: List all USB serial ports with VID/PID information'
+
+    def cmd_ACE_DEBUG_USB_PORTS(self, gcmd):
+        """Debug command to show all USB serial ports and their properties"""
+        self.gcode.respond_info("=" * 70)
+        self.gcode.respond_info("USB Serial Ports Debug Information")
+        self.gcode.respond_info("=" * 70)
+
+        try:
+            ports = serial.tools.list_ports.comports()
+
+            if not ports:
+                self.gcode.respond_info("\nNo USB serial ports found!")
+                self.gcode.respond_info("\nTroubleshooting:")
+                self.gcode.respond_info("  • Check device is connected: ls /dev/ttyACM* /dev/ttyUSB*")
+                self.gcode.respond_info("  • Check USB cable")
+                self.gcode.respond_info("  • Check device power")
+                return
+
+            self.gcode.respond_info(f"\nFound {len(ports)} USB serial port(s):\n")
+
+            for i, port in enumerate(ports, 1):
+                self.gcode.respond_info(f"Port {i}:")
+                self.gcode.respond_info(f"  Device:       {port.device}")
+
+                if port.vid and port.pid:
+                    self.gcode.respond_info(f"  VID:PID:      0x{port.vid:04X}:0x{port.pid:04X}")
+                else:
+                    self.gcode.respond_info(f"  VID:PID:      Not available")
+
+                self.gcode.respond_info(f"  Manufacturer: {port.manufacturer or 'N/A'}")
+                self.gcode.respond_info(f"  Product:      {port.product or 'N/A'}")
+                self.gcode.respond_info(f"  Serial:       {port.serial_number or 'N/A'}")
+                self.gcode.respond_info(f"  Location:     {port.location or 'N/A'}")
+                self.gcode.respond_info(f"  HWID:         {port.hwid or 'N/A'}")
+
+                # Check if it would match ACE detection
+                is_ace_vid = port.vid == AceDeviceDiscovery.ACE_VID
+                is_ace_mfr = port.manufacturer and AceDeviceDiscovery.ACE_MANUFACTURER.upper() in str(port.manufacturer).upper()
+                is_ace_product = port.product and AceDeviceDiscovery.ACE_PRODUCT_NAME.upper() in str(port.product).upper()
+
+                if is_ace_vid or is_ace_mfr or is_ace_product:
+                    self.gcode.respond_info(f"  ACE Match:    ✓ YES")
+                    if is_ace_vid:
+                        self.gcode.respond_info(f"                → Matched by VID (0x{AceDeviceDiscovery.ACE_VID:04X})")
+                    if is_ace_mfr or is_ace_product:
+                        self.gcode.respond_info(f"                → Matched by manufacturer/product string")
+                else:
+                    self.gcode.respond_info(f"  ACE Match:    ✗ NO")
+                    self.gcode.respond_info(f"                → Expected VID: 0x{AceDeviceDiscovery.ACE_VID:04X}")
+                    self.gcode.respond_info(f"                → Expected Manufacturer: '{AceDeviceDiscovery.ACE_MANUFACTURER}'")
+                    self.gcode.respond_info(f"                → Expected Product: '{AceDeviceDiscovery.ACE_PRODUCT_NAME}'")
+
+                self.gcode.respond_info("")
+
+            self.gcode.respond_info("=" * 70)
+            self.gcode.respond_info("\nTo add support for a different VID/PID:")
+            self.gcode.respond_info("  1. Note the VID:PID of your device above")
+            self.gcode.respond_info("  2. Edit ace.py and update ACE_VID/ACE_PID constants")
+            self.gcode.respond_info("  3. Or update ACE_MANUFACTURER/ACE_PRODUCT_NAME strings")
+            self.gcode.respond_info("  4. Restart Klipper")
+
+        except Exception as e:
+            self.gcode.respond_info(f"ERROR: Failed to enumerate USB ports: {e}")
+            import traceback
+            self.gcode.respond_info(traceback.format_exc())
 
     cmd_ACE_SHOW_USB_INFO_help = 'Show USB topology and device mapping information'
 
