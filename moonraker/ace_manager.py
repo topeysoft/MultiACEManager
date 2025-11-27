@@ -6,12 +6,13 @@
 
 from __future__ import annotations
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List
+import asyncio
+import json
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..confighelper import ConfigHelper
-    from ..common import WebRequest
-    from .klippy_apis import KlippyAPI as APIComp
+    from confighelper import ConfigHelper
+    from websockets import WebRequest
 
 class AceManager:
     """
@@ -23,7 +24,7 @@ class AceManager:
 
     def __init__(self, config: ConfigHelper) -> None:
         self.server = config.get_server()
-        self.klippy_apis: APIComp = self.server.lookup_component('klippy_apis')
+        self.klippy_apis = self.server.lookup_component('klippy_apis')
 
         # Register API endpoints
         self.server.register_endpoint(
@@ -148,7 +149,6 @@ class AceManager:
             await self.klippy_apis.run_gcode(script)
 
             # Wait a moment for scan to complete
-            import asyncio
             await asyncio.sleep(1.0)
 
             # Get updated device list
@@ -212,7 +212,6 @@ class AceManager:
             # that calls the Python reorder_gates method
 
             # Build GCode command with JSON-encoded device order
-            import json
             device_order_json = json.dumps(device_order)
 
             # This would require a new GCode command like:
