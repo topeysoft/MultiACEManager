@@ -1519,9 +1519,11 @@ class BunnyAce:
             # Use device-specific variable names if device_id is set (multi-device mode)
             # Otherwise use shared variable names (single device mode)
             if hasattr(self, 'device_id') and self.device_id:
-                color_var = f'ace_gate_color_{self.device_id}'
-                type_var = f'ace_gate_type_{self.device_id}'
-                temp_var = f'ace_gate_temp_{self.device_id}'
+                # Sanitize device_id to ensure valid Python variable name
+                safe_id = self.device_id.replace('-', '_').replace('.', '_')
+                color_var = f'ace_color_{safe_id}'
+                type_var = f'ace_type_{safe_id}'
+                temp_var = f'ace_temp_{safe_id}'
             else:
                 color_var = 'ace_gate_color'
                 type_var = 'ace_gate_type'
@@ -1621,9 +1623,11 @@ class BunnyAce:
         # Use device-specific variable names if device_id is set (multi-device mode)
         # Otherwise fall back to shared variable names (single device mode)
         if hasattr(self, 'device_id') and self.device_id:
-            color_var = f'ace_gate_color_{self.device_id}'
-            type_var = f'ace_gate_type_{self.device_id}'
-            temp_var = f'ace_gate_temp_{self.device_id}'
+            # Sanitize device_id to ensure valid Python variable name
+            safe_id = self.device_id.replace('-', '_').replace('.', '_')
+            color_var = f'ace_color_{safe_id}'
+            type_var = f'ace_type_{safe_id}'
+            temp_var = f'ace_temp_{safe_id}'
         else:
             color_var = 'ace_gate_color'
             type_var = 'ace_gate_type'
@@ -2158,9 +2162,11 @@ class AceManager:
                 # and save them for future reference
                 if hasattr(ace_instance, 'save_variables'):
                     # Try device-specific variables first, fall back to shared variables
-                    color_var = f'ace_gate_color_{device_id}'
-                    type_var = f'ace_gate_type_{device_id}'
-                    temp_var = f'ace_gate_temp_{device_id}'
+                    # Sanitize device_id to ensure valid Python variable name
+                    safe_id = device_id.replace('-', '_').replace('.', '_')
+                    color_var = f'ace_color_{safe_id}'
+                    type_var = f'ace_type_{safe_id}'
+                    temp_var = f'ace_temp_{safe_id}'
 
                     current_colors = ace_instance.save_variables.allVariables.get(color_var,
                                     ace_instance.save_variables.allVariables.get('ace_gate_color', []))
@@ -2184,9 +2190,11 @@ class AceManager:
             # Note: Properties are stored per-device (4 gates), not per global gate offset
             if hasattr(ace_instance, 'save_variables'):
                 # Use device-specific variable names
-                color_var = f'ace_gate_color_{device_id}'
-                type_var = f'ace_gate_type_{device_id}'
-                temp_var = f'ace_gate_temp_{device_id}'
+                # Sanitize device_id to ensure valid Python variable name
+                safe_id = device_id.replace('-', '_').replace('.', '_')
+                color_var = f'ace_color_{safe_id}'
+                type_var = f'ace_type_{safe_id}'
+                temp_var = f'ace_temp_{safe_id}'
 
                 if 'gate_colors' in device_props and device_props['gate_colors']:
                     ace_instance.save_variables.allVariables[color_var] = device_props['gate_colors']
@@ -3203,10 +3211,12 @@ class AceManager:
             # Also update the ACE instance's in-memory state using device-specific variable names
             # This prevents cross-contamination when multiple devices share the same save_variables object
             if hasattr(ace_instance, 'save_variables'):
-                # Use device-specific variable names: ace_gate_color_{device_id}
-                color_var = f'ace_gate_color_{device_id}'
-                type_var = f'ace_gate_type_{device_id}'
-                temp_var = f'ace_gate_temp_{device_id}'
+                # Use device-specific variable names: ace_color_{device_id}
+                # Sanitize device_id to ensure valid Python variable name
+                safe_id = device_id.replace('-', '_').replace('.', '_')
+                color_var = f'ace_color_{safe_id}'
+                type_var = f'ace_type_{safe_id}'
+                temp_var = f'ace_temp_{safe_id}'
 
                 if color:
                     if color_var not in ace_instance.save_variables.allVariables:
