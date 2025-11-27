@@ -1939,8 +1939,10 @@ class AceManager:
         """Auto-detect ACE devices and create instances using USB enumeration"""
         logging.info("ACE Manager: Auto-detecting ACE devices via USB enumeration...")
 
-        # Step 1: Scan USB ports for ACE devices
-        discovered_devices = AceDeviceDiscovery.find_ace_devices()
+        # Use shared enumeration logic
+        enum_plan = self._reenumerate_devices()
+
+        discovered_devices = enum_plan['discovered_devices']
 
         if not discovered_devices:
             logging.warning("ACE Manager: No ACE devices found via USB enumeration")
@@ -1948,45 +1950,17 @@ class AceManager:
             # Don't fail - devices might be connected later
             return
 
-        logging.info(f"ACE Manager: Found {len(discovered_devices)} potential ACE device(s)")
+        logging.info(f"ACE Manager: Found {len(discovered_devices)} ACE device(s)")
 
-        # Step 2: Probe each device to get device ID and verify it's ACE
-        verified_devices = []
-        for dev_info in discovered_devices:
-            port = dev_info['port']
-            usb_loc = dev_info.get('location')
-            logging.info(f"ACE Manager: Probing {port}...")
+        # Build serial ports string and store device IDs
+        serial_ports_str = ', '.join([dev['port'] for dev in discovered_devices])
 
-            ace_info = AceDeviceDiscovery.probe_ace_device(port, usb_location=usb_loc)
-            if ace_info:
-                verified_devices.append({
-                    'port': port,
-                    'device_id': ace_info['device_id'],
-                    'model': ace_info['model'],
-                    'firmware': ace_info['firmware'],
-                    'usb_location': dev_info['location']
-                })
-                logging.info(f"  ✓ ACE Device: {ace_info['model']} (ID: {ace_info['device_id']}, FW: {ace_info['firmware']})")
-            else:
-                logging.info(f"  ✗ Not an ACE device or failed to communicate")
-
-        if not verified_devices:
-            logging.warning("ACE Manager: No verified ACE devices found")
-            logging.warning("ACE Manager: Devices may be in use or communication failed")
-            return
-
-        # Step 3: Build serial ports string and store device IDs
-        # Sort by USB location for deterministic ordering
-        verified_devices.sort(key=lambda x: x.get('usb_location', '') or '')
-
-        serial_ports_str = ', '.join([dev['port'] for dev in verified_devices])
-
-        logging.info(f"ACE Manager: Configuring {len(verified_devices)} ACE device(s) with {len(verified_devices) * 4} total gates")
+        logging.info(f"ACE Manager: Configuring {len(discovered_devices)} ACE device(s) with {len(discovered_devices) * 4} total gates")
         logging.info(f"ACE Manager: Port order: {serial_ports_str}")
 
         # Store device IDs for reconnection logic (will be used in _handle_ready)
-        self.device_ids = {dev['port']: dev['device_id'] for dev in verified_devices}
-        self._verified_devices = verified_devices  # Save for device mapper initialization
+        self.device_ids = {dev['port']: dev['device_id'] for dev in discovered_devices}
+        self._verified_devices = discovered_devices  # Save for device mapper initialization
 
         # Use existing serial port setup with discovered ports
         self._setup_from_serial_ports(config, serial_ports_str)
@@ -2508,6 +2482,422 @@ class AceManager:
             'devices': self.get_device_list()
         }
 
+    def _reenumerate_devices(self):
+        """
+        Shared enumeration logic for both boot-time and runtime device discovery.
+
+        Scans USB ports, probes ACE devices, sorts by USB location, calculates gate offsets,
+        and compares with current configuration.
+
+        Returns:
+            dict: Enumeration plan containing:
+                - current_devices: Current ace_devices list
+                - discovered_devices: Newly scanned devices (sorted by USB location)
+                - added: List of devices to add (not in current config)
+                - removed: List of devices to remove (missing from scan)
+                - reordered: List of devices with changed gate offsets
+                - unchanged: List of devices staying the same
+                - gate_offset_map: Dict mapping device_id -> new gate offset
+        """
+        logging.info("ACE Manager: Starting device re-enumeration...")
+
+        # Get current configuration
+        current_devices = self.ace_devices if hasattr(self, 'ace_devices') else []
+        current_device_ids = {d.get('device_id'): d for d in current_devices}
+
+        # Discover all ACE devices on USB ports
+        discovered = AceDeviceDiscovery.scan_ports()
+
+        if not discovered:
+            logging.warning("ACE Manager: No ACE devices found during re-enumeration")
+            return {
+                'current_devices': current_devices,
+                'discovered_devices': [],
+                'added': [],
+                'removed': list(current_devices),
+                'reordered': [],
+                'unchanged': [],
+                'gate_offset_map': {}
+            }
+
+        # Probe and verify each discovered device
+        verified_devices = []
+        for device_info in discovered:
+            port = device_info.get('port')
+            if not port:
+                continue
+
+            try:
+                # Probe the device
+                probe_result = AceDeviceDiscovery.probe_device(port, baud=self.baud)
+                if probe_result:
+                    # Generate device ID (USB location-based)
+                    device_id = self._generate_device_id(device_info)
+
+                    verified_devices.append({
+                        'device_id': device_id,
+                        'port': port,
+                        'usb_location': device_info.get('usb_location', ''),
+                        'firmware_version': probe_result.get('firmware_version', 'unknown'),
+                        'device_info': device_info,
+                        'probe_result': probe_result
+                    })
+                    logging.info(f"ACE Manager: Verified device {device_id} at {port}")
+            except Exception as e:
+                logging.error(f"ACE Manager: Failed to probe device at {port}: {e}")
+
+        if not verified_devices:
+            logging.error("ACE Manager: No ACE devices could be verified")
+            return {
+                'current_devices': current_devices,
+                'discovered_devices': [],
+                'added': [],
+                'removed': list(current_devices),
+                'reordered': [],
+                'unchanged': [],
+                'gate_offset_map': {}
+            }
+
+        # Sort devices by USB location for deterministic ordering
+        verified_devices.sort(key=lambda d: d.get('usb_location', ''))
+
+        # Calculate new gate offsets (continuous: 0-3, 4-7, 8-11...)
+        gate_offset_map = {}
+        for i, dev in enumerate(verified_devices):
+            gate_offset_map[dev['device_id']] = i * 4
+
+        # Analyze changes
+        discovered_device_ids = {d['device_id']: d for d in verified_devices}
+
+        added = []
+        removed = []
+        reordered = []
+        unchanged = []
+
+        # Find added devices (in discovered, not in current)
+        for device_id, dev in discovered_device_ids.items():
+            if device_id not in current_device_ids:
+                added.append({
+                    'device_id': device_id,
+                    'port': dev['port'],
+                    'usb_location': dev['usb_location'],
+                    'gate_offset': gate_offset_map[device_id],
+                    'gates': f"{gate_offset_map[device_id]}-{gate_offset_map[device_id]+3}"
+                })
+
+        # Find removed devices (in current, not in discovered)
+        for device_id, dev in current_device_ids.items():
+            if device_id not in discovered_device_ids:
+                removed.append({
+                    'device_id': device_id,
+                    'port': dev.get('port', 'unknown'),
+                    'gate_offset': dev.get('gate_offset', -1),
+                    'gates': f"{dev.get('gate_offset', -1)}-{dev.get('gate_offset', -1)+3}"
+                })
+
+        # Find reordered devices (gate offset changed)
+        for device_id, dev in discovered_device_ids.items():
+            if device_id in current_device_ids:
+                old_offset = current_device_ids[device_id].get('gate_offset', -1)
+                new_offset = gate_offset_map[device_id]
+
+                if old_offset != new_offset:
+                    reordered.append({
+                        'device_id': device_id,
+                        'port': dev['port'],
+                        'usb_location': dev['usb_location'],
+                        'old_gate_offset': old_offset,
+                        'new_gate_offset': new_offset,
+                        'old_gates': f"{old_offset}-{old_offset+3}",
+                        'new_gates': f"{new_offset}-{new_offset+3}"
+                    })
+                else:
+                    unchanged.append({
+                        'device_id': device_id,
+                        'port': dev['port'],
+                        'usb_location': dev['usb_location'],
+                        'gate_offset': new_offset,
+                        'gates': f"{new_offset}-{new_offset+3}"
+                    })
+
+        logging.info(f"ACE Manager: Enumeration complete - Added: {len(added)}, "
+                    f"Removed: {len(removed)}, Reordered: {len(reordered)}, "
+                    f"Unchanged: {len(unchanged)}")
+
+        return {
+            'current_devices': current_devices,
+            'discovered_devices': verified_devices,
+            'added': added,
+            'removed': removed,
+            'reordered': reordered,
+            'unchanged': unchanged,
+            'gate_offset_map': gate_offset_map
+        }
+
+    def _check_enumeration_safety(self):
+        """
+        Check if it's safe to apply device enumeration (hot-reload).
+
+        Returns:
+            tuple: (bool is_safe, str reason)
+        """
+        # Check if printer is printing
+        try:
+            idle_timeout = self.printer.lookup_object('idle_timeout')
+            if hasattr(idle_timeout, 'state'):
+                if idle_timeout.state == "Printing":
+                    return False, "Cannot re-enumerate during active print"
+        except:
+            pass
+
+        # Check print_stats for printing state
+        try:
+            print_stats = self.printer.lookup_object('print_stats')
+            if hasattr(print_stats, 'state'):
+                if print_stats.state in ['printing', 'paused']:
+                    return False, f"Cannot re-enumerate while print is {print_stats.state}"
+        except:
+            pass
+
+        # Check if any ACE device has filament loaded
+        for device in self.ace_devices:
+            ace_instance = device.get('instance')
+            if ace_instance:
+                try:
+                    status = ace_instance.get_status()
+
+                    # Check if filament is detected at extruder sensor
+                    if hasattr(ace_instance, 'extruder_sensor'):
+                        if ace_instance.extruder_sensor.last_state == 1:  # Filament detected
+                            device_id = device.get('device_id', 'unknown')
+                            return False, f"Cannot re-enumerate with filament loaded (detected on {device_id})"
+
+                    # Check if filament is detected at toolhead sensor
+                    if hasattr(ace_instance, 'toolhead_sensor'):
+                        if ace_instance.toolhead_sensor.last_state == 1:  # Filament detected
+                            device_id = device.get('device_id', 'unknown')
+                            return False, f"Cannot re-enumerate with filament in toolhead (detected on {device_id})"
+
+                    # Check current_index (loaded gate)
+                    if status.get('current_index', -1) >= 0:
+                        device_id = device.get('device_id', 'unknown')
+                        gate = status.get('current_index', -1)
+                        return False, f"Cannot re-enumerate with active gate (gate {gate} on {device_id})"
+
+                except Exception as e:
+                    logging.warning(f"ACE Manager: Error checking device safety: {e}")
+
+        return True, "Safe to re-enumerate"
+
+    def _apply_device_enumeration(self, enum_plan):
+        """
+        Apply device enumeration plan and reconfigure ACE devices at runtime.
+
+        This method performs a hot-reload of the ACE device configuration without
+        requiring a Klipper restart.
+
+        Args:
+            enum_plan: Dict returned by _reenumerate_devices()
+
+        Returns:
+            dict: Result of the operation with status and changes applied
+
+        Raises:
+            Exception: If enumeration cannot be safely applied
+        """
+        logging.info("ACE Manager: Applying device enumeration changes...")
+
+        # Safety check
+        is_safe, reason = self._check_enumeration_safety()
+        if not is_safe:
+            raise Exception(f"Safety check failed: {reason}")
+
+        discovered_devices = enum_plan['discovered_devices']
+        added = enum_plan['added']
+        removed = enum_plan['removed']
+        reordered = enum_plan['reordered']
+        gate_offset_map = enum_plan['gate_offset_map']
+
+        if not discovered_devices:
+            raise Exception("No devices discovered - cannot apply empty configuration")
+
+        # Step 1: Shut down all current ACE instances
+        logging.info("ACE Manager: Shutting down current ACE instances...")
+        for device in self.ace_devices:
+            ace_instance = device.get('instance')
+            if ace_instance:
+                try:
+                    # Disconnect serial connection
+                    if hasattr(ace_instance, 'serial') and ace_instance.serial:
+                        ace_instance.serial.close()
+                        logging.info(f"ACE Manager: Closed serial connection for {device.get('device_id')}")
+                except Exception as e:
+                    logging.warning(f"ACE Manager: Error closing serial for {device.get('device_id')}: {e}")
+
+        # Step 2: Clear current device list
+        old_device_count = len(self.ace_devices)
+        self.ace_devices.clear()
+
+        # Step 3: Create new ACE instances from discovered devices
+        logging.info(f"ACE Manager: Creating {len(discovered_devices)} new ACE instances...")
+
+        for i, dev in enumerate(discovered_devices):
+            device_id = dev['device_id']
+            port = dev['port']
+            gate_offset = gate_offset_map[device_id]
+
+            try:
+                # Create ACE configuration on the fly
+                ace_config = {
+                    'serial': port,
+                    'baud': self.baud,
+                    'extruder_sensor_pin': self.extruder_sensor_pin,
+                    'toolhead_sensor_pin': self.toolhead_sensor_pin,
+                    'extruder_move_speed': self.extruder_move_speed,
+                    'toolhead_homing_speed': self.toolhead_homing_speed,
+                    'feed_speed': self.feed_speed,
+                    'retract_speed': self.retract_speed,
+                    'toolchange_retract_length': self.toolchange_retract_length,
+                    'toolchange_feed_length': self.toolchange_feed_length,
+                    'toolhead_sensor_to_nozzle': self.toolhead_sensor_to_nozzle,
+                    'poop_macros': self.poop_macros,
+                    'cut_macros': self.cut_macros,
+                    'max_dryer_temperature': self.max_dryer_temperature,
+                    'gate_offset': gate_offset
+                }
+
+                # Create config wrapper (similar to _setup_from_serial_ports)
+                ace_name = f"ACE_{i+1}"
+
+                class AceConfigWrapper:
+                    def __init__(self, printer, name, ace_config, parent_config):
+                        self.printer = printer
+                        self.name = name
+                        self.ace_config = ace_config
+                        self.parent_config = parent_config
+
+                    def get_printer(self):
+                        return self.printer
+
+                    def get_name(self):
+                        return self.name
+
+                    def getsection(self, section):
+                        class FileconfigSectionWrapper:
+                            def __init__(self, ace_wrapper, section):
+                                self.ace_wrapper = ace_wrapper
+                                self.section = section
+
+                            def get(self, key, default=None):
+                                if key in self.ace_wrapper.ace_config:
+                                    return self.ace_wrapper.ace_config[key]
+                                if self.ace_wrapper.parent_config:
+                                    return self.ace_wrapper.parent_config.get(key, default)
+                                return default
+
+                            def getint(self, key, default=None):
+                                val = self.get(key, default)
+                                if val is None:
+                                    return default
+                                return int(val)
+
+                            def getfloat(self, key, default=None):
+                                val = self.get(key, default)
+                                if val is None:
+                                    return default
+                                return float(val)
+
+                            def getboolean(self, key, default=None):
+                                val = self.get(key, default)
+                                if val is None:
+                                    return default
+                                if isinstance(val, bool):
+                                    return val
+                                return str(val).lower() in ('true', '1', 'yes')
+
+                            def getlist(self, key, default=None):
+                                val = self.get(key, default)
+                                if val is None:
+                                    if default is None:
+                                        return []
+                                    return default
+                                if isinstance(val, list):
+                                    return val
+                                return [item.strip() for item in str(val).split(',') if item.strip()]
+
+                            def getsection(self, section):
+                                return self
+
+                            def error(self, msg):
+                                raise Exception(msg)
+
+                        return FileconfigSectionWrapper(self, section)
+
+                    def error(self, msg):
+                        raise Exception(msg)
+
+                # Create ACE instance
+                config_wrapper = AceConfigWrapper(self.printer, f"ace {ace_name}", ace_config, None)
+                ace_instance = BunnyAce(config_wrapper)
+
+                # Store device info
+                self.ace_devices.append({
+                    'name': ace_name,
+                    'port': port,
+                    'instance': ace_instance,
+                    'gate_offset': gate_offset,
+                    'device_id': device_id
+                })
+
+                # Update device IDs mapping
+                if not hasattr(self, 'device_ids'):
+                    self.device_ids = {}
+                self.device_ids[port] = device_id
+
+                logging.info(f"ACE Manager: Created {ace_name} (ID: {device_id}) on {port} with gate offset {gate_offset}")
+
+            except Exception as e:
+                logging.error(f"ACE Manager: Failed to create ACE instance for {device_id}: {e}")
+                raise Exception(f"Failed to create ACE instance for {device_id}: {e}")
+
+        # Step 4: Update total gates
+        self.total_gates = len(self.ace_devices) * 4
+
+        # Step 5: Update device mapper
+        if hasattr(self, 'device_mapper') and self.device_mapper:
+            for dev in discovered_devices:
+                device_id = dev['device_id']
+                port = dev['port']
+                usb_location = dev.get('usb_location', '')
+                gate_offset = gate_offset_map[device_id]
+
+                self.device_mapper.update_device(device_id, port, usb_location, gate_offset)
+
+            # Migrate device properties to new instances
+            self._migrate_device_properties_to_ace_instances()
+
+            # Save device map
+            try:
+                self.device_mapper.save()
+                logging.info("ACE Manager: Device map updated and saved")
+            except Exception as e:
+                logging.error(f"ACE Manager: Failed to save device map: {e}")
+
+        # Update verified devices for consistency
+        self._verified_devices = discovered_devices
+
+        logging.info(f"ACE Manager: Hot-reload complete - {old_device_count} → {len(self.ace_devices)} devices, {self.total_gates} gates")
+
+        return {
+            'status': 'success',
+            'old_device_count': old_device_count,
+            'new_device_count': len(self.ace_devices),
+            'total_gates': self.total_gates,
+            'added': added,
+            'removed': removed,
+            'reordered': reordered
+        }
+
     def reorder_gates(self, device_order):
         """
         Reorder gate assignments for devices.
@@ -2693,31 +3083,146 @@ class AceManager:
                 ace_instance.write_variables()
                 logging.info(f"ACE Manager: Updated gate {gate} (local gate {local_gate})")
 
-    cmd_ACE_SCAN_DEVICES_help = 'Scan for ACE devices and report findings'
+    cmd_ACE_SCAN_DEVICES_help = 'Scan for ACE devices and optionally apply changes (use APPLY=1 to hot-reload)'
 
     def cmd_ACE_SCAN_DEVICES(self, gcmd):
-        """Scan for ACE devices and report findings"""
-        self.gcode.respond_info('=== ACE Device Scan ===')
-        self.gcode.respond_info('Scanning for ACE devices...')
+        """
+        Scan for ACE devices and report findings.
+        Use APPLY=1 to apply changes and hot-reload device configuration.
+        """
+        apply_changes = gcmd.get_int('APPLY', 0) == 1
 
-        result = self.scan_devices(rescan=True, update_map=True)
+        self.gcode.respond_info('=' * 70)
+        self.gcode.respond_info('ACE Device Scan & Enumeration')
+        self.gcode.respond_info('=' * 70)
+        self.gcode.respond_info('Scanning USB ports for ACE devices...')
 
-        self.gcode.respond_info(f"Found {result['devices_found']} ACE devices")
-        self.gcode.respond_info(f"New devices: {result['new_devices']}")
+        # Run enumeration
+        try:
+            enum_plan = self._reenumerate_devices()
+        except Exception as e:
+            self.gcode.respond_info(f"ERROR: Scan failed: {e}")
+            return
 
-        if result['new_device_list']:
-            self.gcode.respond_info('\nNew devices detected:')
-            for dev in result['new_device_list']:
-                self.gcode.respond_info(
-                    f"  {dev['device_id']}: {dev['model']} v{dev['firmware']} @ {dev['port']}"
-                )
+        current_devices = enum_plan['current_devices']
+        discovered_devices = enum_plan['discovered_devices']
+        added = enum_plan['added']
+        removed = enum_plan['removed']
+        reordered = enum_plan['reordered']
+        unchanged = enum_plan['unchanged']
 
-        self.gcode.respond_info('\nAll devices:')
-        for dev in result['devices']['devices']:
-            gates_str = f"{dev['gates'][0]}-{dev['gates'][-1]}"
-            self.gcode.respond_info(
-                f"  {dev['name']}: {dev['model']} @ {dev['port']} (Gates {gates_str})"
-            )
+        # Report scan results
+        self.gcode.respond_info(f"\nScan Results:")
+        self.gcode.respond_info(f"  Devices currently configured: {len(current_devices)}")
+        self.gcode.respond_info(f"  Devices discovered on USB:    {len(discovered_devices)}")
+
+        if not discovered_devices:
+            self.gcode.respond_info("\n⚠ WARNING: No ACE devices found!")
+            self.gcode.respond_info("Check USB connections and power.")
+            return
+
+        # Show detailed change analysis
+        has_changes = len(added) > 0 or len(removed) > 0 or len(reordered) > 0
+
+        if not has_changes:
+            self.gcode.respond_info("\n✓ No configuration changes detected")
+            self.gcode.respond_info(f"  All {len(unchanged)} device(s) unchanged")
+        else:
+            self.gcode.respond_info("\n⚠ Configuration changes detected:")
+
+            if added:
+                self.gcode.respond_info(f"\n  ➕ Devices to ADD ({len(added)}):")
+                for dev in added:
+                    self.gcode.respond_info(f"     • {dev['device_id']}")
+                    self.gcode.respond_info(f"       Port: {dev['port']}")
+                    self.gcode.respond_info(f"       USB:  {dev['usb_location']}")
+                    self.gcode.respond_info(f"       Gates: {dev['gates']}")
+
+            if removed:
+                self.gcode.respond_info(f"\n  ➖ Devices to REMOVE ({len(removed)}):")
+                for dev in removed:
+                    self.gcode.respond_info(f"     • {dev['device_id']}")
+                    self.gcode.respond_info(f"       Was on port: {dev['port']}")
+                    self.gcode.respond_info(f"       Was gates: {dev['gates']}")
+
+            if reordered:
+                self.gcode.respond_info(f"\n  🔄 Devices with CHANGED gate offsets ({len(reordered)}):")
+                for dev in reordered:
+                    self.gcode.respond_info(f"     • {dev['device_id']}")
+                    self.gcode.respond_info(f"       Port: {dev['port']}")
+                    self.gcode.respond_info(f"       USB:  {dev['usb_location']}")
+                    self.gcode.respond_info(f"       Gates: {dev['old_gates']} → {dev['new_gates']}")
+
+            if unchanged:
+                self.gcode.respond_info(f"\n  ✓ Devices UNCHANGED ({len(unchanged)}):")
+                for dev in unchanged:
+                    self.gcode.respond_info(f"     • {dev['device_id']} - Gates {dev['gates']}")
+
+        # Show discovered devices summary
+        self.gcode.respond_info("\n" + "-" * 70)
+        self.gcode.respond_info("Discovered Device Configuration:")
+        self.gcode.respond_info("-" * 70)
+        for i, dev in enumerate(discovered_devices):
+            device_id = dev['device_id']
+            port = dev['port']
+            usb_location = dev.get('usb_location', 'N/A')
+            gate_offset = enum_plan['gate_offset_map'][device_id]
+            gates_str = f"{gate_offset}-{gate_offset+3}"
+
+            self.gcode.respond_info(f"\nDevice {i+1}: {device_id}")
+            self.gcode.respond_info(f"  Port:      {port}")
+            self.gcode.respond_info(f"  USB:       {usb_location}")
+            self.gcode.respond_info(f"  Gates:     {gates_str}")
+            self.gcode.respond_info(f"  Firmware:  {dev.get('firmware_version', 'unknown')}")
+
+        # Apply changes if requested
+        if apply_changes:
+            if not has_changes:
+                self.gcode.respond_info("\n" + "=" * 70)
+                self.gcode.respond_info("ℹ No changes to apply - configuration already up to date")
+                self.gcode.respond_info("=" * 70)
+                return
+
+            self.gcode.respond_info("\n" + "=" * 70)
+            self.gcode.respond_info("APPLY=1 detected - Attempting hot-reload...")
+            self.gcode.respond_info("=" * 70)
+
+            # Check safety
+            is_safe, reason = self._check_enumeration_safety()
+            if not is_safe:
+                self.gcode.respond_info(f"\n❌ SAFETY CHECK FAILED: {reason}")
+                self.gcode.respond_info("\nCannot apply changes. Please:")
+                self.gcode.respond_info("  1. Ensure no print is active")
+                self.gcode.respond_info("  2. Unload all filament")
+                self.gcode.respond_info("  3. Try again with ACE_SCAN_DEVICES APPLY=1")
+                return
+
+            # Apply the enumeration
+            try:
+                result = self._apply_device_enumeration(enum_plan)
+                self.gcode.respond_info("\n✅ Hot-reload SUCCESSFUL!")
+                self.gcode.respond_info(f"   Devices: {result['old_device_count']} → {result['new_device_count']}")
+                self.gcode.respond_info(f"   Gates:   {result['total_gates']}")
+                self.gcode.respond_info("\nDevice configuration updated without restart!")
+            except Exception as e:
+                self.gcode.respond_info(f"\n❌ Hot-reload FAILED: {e}")
+                self.gcode.respond_info("\nKlipper restart required to recover.")
+                self.gcode.respond_info("Run: RESTART")
+
+        else:
+            # Not applying - show instructions
+            if has_changes:
+                self.gcode.respond_info("\n" + "=" * 70)
+                self.gcode.respond_info("ℹ Preview mode - no changes applied")
+                self.gcode.respond_info("=" * 70)
+                self.gcode.respond_info("\nTo apply these changes:")
+                self.gcode.respond_info("  Option 1: ACE_SCAN_DEVICES APPLY=1  (hot-reload, no restart)")
+                self.gcode.respond_info("  Option 2: RESTART                    (full Klipper restart)")
+                self.gcode.respond_info("\nHot-reload safety requirements:")
+                self.gcode.respond_info("  • No active print")
+                self.gcode.respond_info("  • All filament unloaded")
+            else:
+                self.gcode.respond_info("\n" + "=" * 70)
 
     cmd_ACE_LIST_DEVICES_help = 'List all ACE devices with status'
 
@@ -2876,9 +3381,18 @@ class AceManager:
             self.gcode.respond_info("   This is not reliable for multiple identical devices.")
             self.gcode.respond_info("   Consider using a USB hub to enable USB location-based IDs.")
 
+        # Suggest scanning if there are disconnected devices
+        if disconnected_devices:
+            self.gcode.respond_info("\nℹ TIP: Devices may have changed. To scan and update:")
+            self.gcode.respond_info("   ACE_SCAN_DEVICES        - Preview changes")
+            self.gcode.respond_info("   ACE_SCAN_DEVICES APPLY=1 - Apply changes (hot-reload)")
+
         self.gcode.respond_info("\n" + "=" * 70)
         self.gcode.respond_info("Device properties (colors, materials, temps) persist with each device")
         self.gcode.respond_info("Gate offsets are dynamically assigned based on connected device order")
+        self.gcode.respond_info("\nHot-plug support:")
+        self.gcode.respond_info("  • Run ACE_SCAN_DEVICES to detect device changes")
+        self.gcode.respond_info("  • Use APPLY=1 to hot-reload configuration without restart")
         self.gcode.respond_info("=" * 70)
 
     cmd_ACE_REORDER_DEVICES_help = 'Reorder ACE device gate assignments'
