@@ -1691,6 +1691,16 @@ class AceManager:
         self.gcode.register_command(
             'ACE_REORDER_DEVICES', self.cmd_ACE_REORDER_DEVICES,
             desc=self.cmd_ACE_REORDER_DEVICES_help)
+        # Dryer commands
+        self.gcode.register_command(
+            'ACE_START_DRYING', self.cmd_ACE_START_DRYING,
+            desc=self.cmd_ACE_START_DRYING_help)
+        self.gcode.register_command(
+            'ACE_STOP_DRYING', self.cmd_ACE_STOP_DRYING,
+            desc=self.cmd_ACE_STOP_DRYING_help)
+        self.gcode.register_command(
+            'ACE_GET_DRYER_STATUS', self.cmd_ACE_GET_DRYER_STATUS,
+            desc=self.cmd_ACE_GET_DRYER_STATUS_help)
 
     def _setup_from_serial_ports(self, config, serial_ports_str):
         """Setup ACE devices from comma-separated serial port list"""
@@ -2261,16 +2271,11 @@ class AceManager:
         all_gate_temps = []
         all_active_gates = []
         all_spool_ids = []
+        all_dryers = []  # NEW: Per-device dryer status
 
-        # Aggregate temperatures and dryer status from first device
+        # Aggregate temperatures and status from first device
         first_ace = self.ace_devices[0]['instance'] if self.ace_devices else None
         overall_temp = 0
-        overall_dryer_status = {
-            'status': 'stop',
-            'target_temp': 0,
-            'duration': 0,
-            'remain_time': 0
-        }
         overall_status = 'ready'
 
         # Aggregate data from all ACE devices
@@ -2291,10 +2296,28 @@ class AceManager:
             num_gates = status.get('num_gates', 4)
             all_spool_ids.extend(range(offset + 1, offset + num_gates + 1))
 
-            # Use first ACE's temp and dryer status
+            # Build dryer status for this device
+            dryer_status = status.get('dryer_status', {
+                'status': 'stop',
+                'target_temp': 0,
+                'duration': 0,
+                'remain_time': 0
+            })
+
+            all_dryers.append({
+                'device_id': device.get('device_id', f"dev_{offset}"),
+                'device_name': device.get('name', f"ACE Unit {offset//4 + 1}"),
+                'gate_offset': offset,
+                'status': dryer_status.get('status', 'stop'),
+                'temp': status.get('temp', 0),
+                'target_temp': dryer_status.get('target_temp', 0),
+                'duration': dryer_status.get('duration', 0),
+                'remain_time': dryer_status.get('remain_time', 0)
+            })
+
+            # Use first ACE's temp and status
             if device == self.ace_devices[0]:
                 overall_temp = status.get('temp', 0)
-                overall_dryer_status = status.get('dryer_status', overall_dryer_status)
                 overall_status = status.get('status', 'ready')
 
         # Get selected gate from first ACE's save variables
@@ -2327,20 +2350,21 @@ class AceManager:
             status = ace.get_status()
             device_id = dev.get('device_id', f"dev_{dev['gate_offset']}")
 
-            # Read device-specific gate configuration from save_variables
-            # Fall back to device's own status if device-specific vars don't exist
-            gate_color = ace.save_variables.allVariables.get(
-                f'ace_{device_id}_gate_color',
-                status.get('gate_color', ['FFFFFF'] * 4)
-            )
-            gate_material = ace.save_variables.allVariables.get(
-                f'ace_{device_id}_gate_type',
-                status.get('gate_material', [''] * 4)
-            )
-            gate_temp = ace.save_variables.allVariables.get(
-                f'ace_{device_id}_gate_temp',
-                status.get('gate_temp', [230] * 4)
-            )
+            # Get gate configuration from device properties (stored in device mapper)
+            # This ensures properties persist with the device across reboots/port changes
+            if hasattr(self, 'device_mapper') and self.device_mapper:
+                device_props = self.device_mapper.get_device_properties(device_id)
+                gate_color = device_props.get('gate_colors', status.get('gate_color', ['FFFFFF'] * 4))
+                gate_material = device_props.get('gate_materials', status.get('gate_material', [''] * 4))
+                gate_temp = device_props.get('gate_temps', status.get('gate_temp', [230] * 4))
+            else:
+                # Fallback to ACE instance's own status
+                gate_color = status.get('gate_color', ['FFFFFF'] * 4)
+                gate_material = status.get('gate_material', [''] * 4)
+                gate_temp = status.get('gate_temp', [230] * 4)
+
+            # Get dryer status for this device
+            dryer_status = status.get('dryer_status', {})
 
             devices_detail.append({
                 'device_id': device_id,
@@ -2349,13 +2373,16 @@ class AceManager:
                 'gate_material': gate_material,
                 'gate_temp': gate_temp,
                 'active_gate': status.get('active_gate', []),
-                'spool_id': list(range(dev['gate_offset'] + 1, dev['gate_offset'] + 5))
+                'spool_id': list(range(dev['gate_offset'] + 1, dev['gate_offset'] + 5)),
+                # NEW: Per-device dryer info
+                'dryer_status': dryer_status,
+                'dryer_temp': status.get('temp', 0)
             })
 
         return {
             'status': overall_status,
             'temp': overall_temp,
-            'dryer_status': overall_dryer_status,
+            'dryers': all_dryers,  # NEW: All dryers array (replaces single dryer_status)
             'gate_color': all_gate_colors,
             'gate_material': all_gate_materials,
             'gate_temp': all_gate_temps,
@@ -2366,7 +2393,7 @@ class AceManager:
             'num_gates': self.total_gates,
             'num_devices': len(self.ace_devices),
             'devices': devices_summary,
-            'devices_detail': devices_detail,  # NEW: Per-device gate data
+            'devices_detail': devices_detail,
         }
 
     def get_device_list(self):
@@ -2613,19 +2640,58 @@ class AceManager:
         type_param = gcmd.get('TYPE', None)
         temp = gcmd.get_int('TEMP', None)
 
-        if color:
-            var_name = f'ace_{device_id}_gate_color'
-            ace_instance.save_variables.allVariables.setdefault(var_name, ['FFFFFF'] * 4)[local_gate] = color
-        if type_param:
-            var_name = f'ace_{device_id}_gate_type'
-            ace_instance.save_variables.allVariables.setdefault(var_name, [''] * 4)[local_gate] = type_param
-        if temp:
-            var_name = f'ace_{device_id}_gate_temp'
-            ace_instance.save_variables.allVariables.setdefault(var_name, [230] * 4)[local_gate] = temp
+        # Update device properties in device mapper (persistent storage)
+        if hasattr(self, 'device_mapper') and self.device_mapper:
+            device_props = self.device_mapper.get_device_properties(device_id)
+            if not device_props:
+                device_props = {
+                    'gate_colors': ['FFFFFF'] * 4,
+                    'gate_materials': [''] * 4,
+                    'gate_temps': [230] * 4
+                }
 
-        if color or type_param or temp:
-            ace_instance.write_variables()
+            if color:
+                if 'gate_colors' not in device_props:
+                    device_props['gate_colors'] = ['FFFFFF'] * 4
+                device_props['gate_colors'][local_gate] = color
+
+            if type_param:
+                if 'gate_materials' not in device_props:
+                    device_props['gate_materials'] = [''] * 4
+                device_props['gate_materials'][local_gate] = type_param
+
+            if temp:
+                if 'gate_temps' not in device_props:
+                    device_props['gate_temps'] = [230] * 4
+                device_props['gate_temps'][local_gate] = temp
+
+            self.device_mapper.update_device_properties(device_id, device_props)
+            self.device_mapper.save()
+
+            # Also update the ACE instance's in-memory state
+            if color and hasattr(ace_instance, 'save_variables'):
+                ace_instance.save_variables.allVariables.setdefault('ace_gate_color', ['FFFFFF'] * 4)[local_gate] = color
+            if type_param and hasattr(ace_instance, 'save_variables'):
+                ace_instance.save_variables.allVariables.setdefault('ace_gate_type', [''] * 4)[local_gate] = type_param
+            if temp and hasattr(ace_instance, 'save_variables'):
+                ace_instance.save_variables.allVariables.setdefault('ace_gate_temp', [230] * 4)[local_gate] = temp
+
+            if (color or type_param or temp) and hasattr(ace_instance, 'write_variables'):
+                ace_instance.write_variables()
+
             logging.info(f"ACE Manager: Updated gate {gate} on device {device_id} (local gate {local_gate})")
+        else:
+            # Fallback to old method if device mapper not available
+            if color:
+                ace_instance.save_variables.allVariables.setdefault('ace_gate_color', ['FFFFFF'] * 4)[local_gate] = color
+            if type_param:
+                ace_instance.save_variables.allVariables.setdefault('ace_gate_type', [''] * 4)[local_gate] = type_param
+            if temp:
+                ace_instance.save_variables.allVariables.setdefault('ace_gate_temp', [230] * 4)[local_gate] = temp
+
+            if color or type_param or temp:
+                ace_instance.write_variables()
+                logging.info(f"ACE Manager: Updated gate {gate} (local gate {local_gate})")
 
     cmd_ACE_SCAN_DEVICES_help = 'Scan for ACE devices and report findings'
 
@@ -2730,6 +2796,21 @@ class AceManager:
             self.gcode.respond_info(f"   Serial Port:  {port}")
             self.gcode.respond_info(f"   Gate Range:   {gates_str}")
 
+            # Show dryer status
+            ace_instance = ace_device.get('instance')
+            if ace_instance:
+                status = ace_instance.get_status()
+                dryer = status.get('dryer_status', {})
+                dryer_status = dryer.get('status', 'unknown')
+                temp = status.get('temp', 0)
+                target_temp = dryer.get('target_temp', 0)
+                remain_time = dryer.get('remain_time', 0)
+
+                if dryer_status == 'running':
+                    self.gcode.respond_info(f"   Dryer:        🔥 Running ({temp}°C → {target_temp}°C, {remain_time}min remaining)")
+                else:
+                    self.gcode.respond_info(f"   Dryer:        ⭘ Stopped ({temp}°C)")
+
             # Show device properties if available
             if device_info and 'properties' in device_info:
                 props = device_info['properties']
@@ -2831,6 +2912,174 @@ class AceManager:
             self.gcode.respond_info(f'Error: Invalid JSON in ORDER parameter: {e}')
         except Exception as e:
             self.gcode.respond_info(f'Error reordering devices: {e}')
+
+    cmd_ACE_START_DRYING_help = 'Start dryer on a specific ACE device'
+
+    def cmd_ACE_START_DRYING(self, gcmd):
+        """Start dryer on a specific ACE device by device ID or gate number"""
+        device_id = gcmd.get('DEVICE', None)
+        gate = gcmd.get_int('GATE', None)
+        temp = gcmd.get_int('TEMP', None)
+        duration = gcmd.get_int('DURATION', 240)
+
+        if temp is None:
+            self.gcode.respond_info('Error: TEMP parameter required')
+            self.gcode.respond_info('Usage: ACE_START_DRYING DEVICE=<device_id> TEMP=<temp> DURATION=<minutes>')
+            self.gcode.respond_info('   or: ACE_START_DRYING GATE=<gate_num> TEMP=<temp> DURATION=<minutes>')
+            return
+
+        # Find target device
+        target_device = None
+        target_ace = None
+
+        if device_id:
+            # Find by device ID
+            for dev in self.ace_devices:
+                if dev.get('device_id') == device_id:
+                    target_device = dev
+                    target_ace = dev['instance']
+                    break
+            if not target_device:
+                self.gcode.respond_info(f'Error: Device {device_id} not found')
+                return
+        elif gate is not None:
+            # Find by gate number
+            for dev in self.ace_devices:
+                offset = dev['gate_offset']
+                if offset <= gate < offset + 4:
+                    target_device = dev
+                    target_ace = dev['instance']
+                    break
+            if not target_device:
+                self.gcode.respond_info(f'Error: Gate {gate} not found')
+                return
+        else:
+            self.gcode.respond_info('Error: Either DEVICE or GATE parameter required')
+            return
+
+        # Validate temperature
+        max_temp = target_ace.max_dryer_temperature if hasattr(target_ace, 'max_dryer_temperature') else 70
+        if temp <= 0 or temp > max_temp:
+            self.gcode.respond_info(f'Error: Temperature must be between 1 and {max_temp}°C')
+            return
+
+        # Validate duration
+        if duration <= 0:
+            self.gcode.respond_info('Error: Duration must be greater than 0 minutes')
+            return
+
+        # Call the ACE device's start drying method
+        device_name = target_device.get('name', f"ACE Unit {target_device['gate_offset']//4 + 1}")
+
+        # Create a pseudo gcmd for the ACE instance
+        class PseudoGcmd:
+            def __init__(self, temp, duration):
+                self._temp = temp
+                self._duration = duration
+
+            def get_int(self, key, default=None):
+                if key == 'TEMP':
+                    return self._temp
+                elif key == 'DURATION':
+                    return self._duration
+                return default
+
+        pseudo_gcmd = PseudoGcmd(temp, duration)
+        target_ace.cmd_ACE_START_DRYING(pseudo_gcmd)
+
+        self.gcode.respond_info(f'Started dryer on {device_name} at {temp}°C for {duration} minutes')
+
+    cmd_ACE_STOP_DRYING_help = 'Stop dryer on a specific ACE device'
+
+    def cmd_ACE_STOP_DRYING(self, gcmd):
+        """Stop dryer on a specific ACE device by device ID or gate number"""
+        device_id = gcmd.get('DEVICE', None)
+        gate = gcmd.get_int('GATE', None)
+
+        # Find target device
+        target_device = None
+        target_ace = None
+
+        if device_id:
+            # Find by device ID
+            for dev in self.ace_devices:
+                if dev.get('device_id') == device_id:
+                    target_device = dev
+                    target_ace = dev['instance']
+                    break
+            if not target_device:
+                self.gcode.respond_info(f'Error: Device {device_id} not found')
+                return
+        elif gate is not None:
+            # Find by gate number
+            for dev in self.ace_devices:
+                offset = dev['gate_offset']
+                if offset <= gate < offset + 4:
+                    target_device = dev
+                    target_ace = dev['instance']
+                    break
+            if not target_device:
+                self.gcode.respond_info(f'Error: Gate {gate} not found')
+                return
+        else:
+            self.gcode.respond_info('Error: Either DEVICE or GATE parameter required')
+            self.gcode.respond_info('Usage: ACE_STOP_DRYING DEVICE=<device_id>')
+            self.gcode.respond_info('   or: ACE_STOP_DRYING GATE=<gate_num>')
+            return
+
+        # Call the ACE device's stop drying method
+        device_name = target_device.get('name', f"ACE Unit {target_device['gate_offset']//4 + 1}")
+
+        # Create a pseudo gcmd
+        class PseudoGcmd:
+            pass
+
+        pseudo_gcmd = PseudoGcmd()
+        target_ace.cmd_ACE_STOP_DRYING(pseudo_gcmd)
+
+        self.gcode.respond_info(f'Stopped dryer on {device_name}')
+
+    cmd_ACE_GET_DRYER_STATUS_help = 'Show dryer status for all ACE devices'
+
+    def cmd_ACE_GET_DRYER_STATUS(self, gcmd):
+        """Show dryer status for all ACE devices"""
+        self.gcode.respond_info("=" * 70)
+        self.gcode.respond_info("ACE Dryer Status")
+        self.gcode.respond_info("=" * 70)
+
+        for dev in self.ace_devices:
+            ace = dev['instance']
+            status = ace.get_status()
+            device_name = dev.get('name', f"ACE Unit {dev['gate_offset']//4 + 1}")
+            device_id = dev.get('device_id', 'unknown')
+            gate_offset = dev['gate_offset']
+            gates_str = f"{gate_offset}-{gate_offset + 3}"
+
+            dryer = status.get('dryer_status', {})
+            dryer_status = dryer.get('status', 'unknown')
+            temp = status.get('temp', 0)
+            target_temp = dryer.get('target_temp', 0)
+            duration = dryer.get('duration', 0)
+            remain_time = dryer.get('remain_time', 0)
+
+            self.gcode.respond_info(f"\n{device_name} ({device_id}) - Gates {gates_str}:")
+
+            if dryer_status == 'running':
+                self.gcode.respond_info(f"  Status:    🔥 Running")
+                self.gcode.respond_info(f"  Current:   {temp}°C")
+                self.gcode.respond_info(f"  Target:    {target_temp}°C")
+                self.gcode.respond_info(f"  Duration:  {duration} minutes")
+                self.gcode.respond_info(f"  Remaining: {remain_time} minutes")
+            else:
+                self.gcode.respond_info(f"  Status:    ⭘ Stopped")
+                self.gcode.respond_info(f"  Current:   {temp}°C")
+
+        self.gcode.respond_info("\n" + "=" * 70)
+        self.gcode.respond_info("Commands:")
+        self.gcode.respond_info("  ACE_START_DRYING DEVICE=<id> TEMP=<temp> DURATION=<min>")
+        self.gcode.respond_info("  ACE_START_DRYING GATE=<num> TEMP=<temp> DURATION=<min>")
+        self.gcode.respond_info("  ACE_STOP_DRYING DEVICE=<id>  or  ACE_STOP_DRYING GATE=<num>")
+        self.gcode.respond_info("=" * 70)
 
 def load_config(config):
     """Load single ACE or ACE Manager based on config parameters"""

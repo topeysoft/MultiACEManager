@@ -81,16 +81,51 @@ link_extension()
 
 copy_config()
 {
-  echo -n "Copy config file to Klipper... "
-  echo -n "[WARNING] If you have custom [save_variables], you must place the ace_vars.cfg data in your vars file and comment out [save_variables] in ace.cfg"
+  echo -n "Copying config files to Klipper config directory... "
+  echo ""
+
+  # Copy ace.cfg if it doesn't exist
   if [ ! -f "${KLIPPER_CONFIG_HOME}/ace.cfg" ]; then
+      echo "  - Installing ace.cfg"
       cat "${SRCDIR}/ace.cfg" | sed -e "s|{config_path}|${KLIPPER_CONFIG_HOME}|g" > ace.cfg.tmp
       mv ace.cfg.tmp "${KLIPPER_CONFIG_HOME}/ace.cfg"
-      cp ace_vars.cfg "${KLIPPER_CONFIG_HOME}/ace_vars.cfg"
-      echo "[OK]"
   else
-      echo "[SKIPPED]"
+      echo "  - ace.cfg already exists [SKIPPED]"
   fi
+
+  # Copy ace_vars.cfg if it doesn't exist (or backup if corrupted)
+  if [ ! -f "${KLIPPER_CONFIG_HOME}/ace_vars.cfg" ]; then
+      echo "  - Installing ace_vars.cfg"
+      cp "${SRCDIR}/ace_vars.cfg" "${KLIPPER_CONFIG_HOME}/ace_vars.cfg"
+  else
+      echo "  - ace_vars.cfg already exists [SKIPPED]"
+      echo "    [INFO] If experiencing DuplicateOptionError, see MIGRATION_GUIDE.md"
+  fi
+
+  # Copy dryer macros if they don't exist
+  if [ ! -f "${KLIPPER_CONFIG_HOME}/ace_dryer_macros.cfg" ]; then
+      echo "  - Installing ace_dryer_macros.cfg"
+      cp "${SRCDIR}/ace_dryer_macros.cfg" "${KLIPPER_CONFIG_HOME}/ace_dryer_macros.cfg"
+      echo "    [INFO] To use dryer macros, add to printer.cfg:"
+      echo "    [include ace_dryer_macros.cfg]"
+  else
+      echo "  - ace_dryer_macros.cfg already exists [SKIPPED]"
+  fi
+
+  # Copy example auto-detect config
+  if [ ! -f "${KLIPPER_CONFIG_HOME}/ace_manager_auto_detect.cfg" ]; then
+      echo "  - Installing ace_manager_auto_detect.cfg (example config)"
+      cp "${SRCDIR}/ace_manager_auto_detect.cfg" "${KLIPPER_CONFIG_HOME}/ace_manager_auto_detect.cfg"
+      echo "    [INFO] This is a reference config, not automatically included"
+  else
+      echo "  - ace_manager_auto_detect.cfg already exists [SKIPPED]"
+  fi
+
+  echo "[OK]"
+  echo ""
+  echo "[WARNING] If you have custom [save_variables], you must:"
+  echo "  1. Copy ace_vars.cfg content to your custom vars file"
+  echo "  2. Comment out [save_variables] in ace.cfg"
 }
 
 install_moonraker_component()
@@ -131,31 +166,58 @@ install_requirements()
 
 uninstall()
 {
+    echo "Uninstalling BunnyACE..."
+    echo ""
+
+    # Uninstall Klipper extension
     if [ -f "${KLIPPER_HOME}/klippy/extras/ace.py" ]; then
-        echo -n "Uninstalling Klipper extension... "
+        echo -n "  - Removing Klipper extension... "
         rm -f "${KLIPPER_HOME}/klippy/extras/ace.py"
         echo "[OK]"
     else
-        echo "ace.py not found in \"${KLIPPER_HOME}/klippy/extras/\". Is it installed?"
+        echo "  - ace.py not found in Klipper extras [SKIPPED]"
     fi
 
     # Uninstall Moonraker component
     if [ -f "${MOONRAKER_HOME}/moonraker/components/ace_manager.py" ]; then
-        echo -n "Uninstalling Moonraker component... "
+        echo -n "  - Removing Moonraker component... "
         rm -f "${MOONRAKER_HOME}/moonraker/components/ace_manager.py"
         echo "[OK]"
-        echo "[INFO] Remember to remove the [ace_manager] section from moonraker.conf"
     else
-        echo "ace_manager.py not found in Moonraker components"
+        echo "  - ace_manager.py not found in Moonraker components [SKIPPED]"
+    fi
+
+    # Ask about config files
+    echo ""
+    echo "Config files found in ${KLIPPER_CONFIG_HOME}:"
+    config_files=0
+    [ -f "${KLIPPER_CONFIG_HOME}/ace.cfg" ] && echo "  - ace.cfg" && config_files=1
+    [ -f "${KLIPPER_CONFIG_HOME}/ace_vars.cfg" ] && echo "  - ace_vars.cfg" && config_files=1
+    [ -f "${KLIPPER_CONFIG_HOME}/ace_dryer_macros.cfg" ] && echo "  - ace_dryer_macros.cfg" && config_files=1
+    [ -f "${KLIPPER_CONFIG_HOME}/ace_device_map.cfg" ] && echo "  - ace_device_map.cfg" && config_files=1
+    [ -f "${KLIPPER_CONFIG_HOME}/ace_manager_auto_detect.cfg" ] && echo "  - ace_manager_auto_detect.cfg" && config_files=1
+
+    if [ "$config_files" -eq 1 ]; then
+        echo ""
+        echo "These config files contain your settings and will NOT be automatically removed."
+        echo "To remove them manually:"
+        echo "  rm ${KLIPPER_CONFIG_HOME}/ace*.cfg"
+    else
+        echo "  (none found)"
     fi
 
     echo ""
-    echo "Uninstall complete!"
-    echo "You can now:"
-    echo "  - Remove the [update_manager BunnyACE] section from moonraker.conf"
-    echo "  - Remove the [ace_manager] section from moonraker.conf"
-    echo "  - Remove ACE configuration from printer.cfg"
-    echo "  - Delete this directory"
+    echo "========================================="
+    echo "Uninstall Complete!"
+    echo "========================================="
+    echo ""
+    echo "Manual cleanup required:"
+    echo "  1. Remove [update_manager BunnyACE] from moonraker.conf"
+    echo "  2. Remove [ace_manager] from moonraker.conf"
+    echo "  3. Remove ACE configuration from printer.cfg"
+    echo "  4. Optionally remove config files (see above)"
+    echo "  5. Delete this directory: rm -rf ${SRCDIR}"
+    echo ""
 }
 
 restart_moonraker()
@@ -243,9 +305,20 @@ if [ "$UNINSTALL" -ne 1 ]; then
     echo "========================================="
     echo ""
     echo "Next steps:"
-    echo "1. Add ACE configuration to printer.cfg (see ace.cfg for example)"
-    echo "2. Restart Klipper and Moonraker"
-    echo "3. Test with: ACE_LIST_DEVICES"
+    echo "1. Add ACE configuration to printer.cfg"
+    echo "   For auto-detect: [include ace_manager_auto_detect.cfg]"
+    echo "   Or see ace.cfg for manual configuration"
+    echo ""
+    echo "2. (Optional) Enable dryer macros in printer.cfg:"
+    echo "   [include ace_dryer_macros.cfg]"
+    echo ""
+    echo "3. Restart Klipper and Moonraker"
+    echo "   sudo systemctl restart klipper moonraker"
+    echo ""
+    echo "4. Test with diagnostic commands:"
+    echo "   ACE_LIST_DEVICES      - Show all ACE devices"
+    echo "   ACE_SHOW_USB_INFO     - Show USB topology and mapping"
+    echo "   ACE_GET_DRYER_STATUS  - Show dryer status for all devices"
     echo ""
     if [ "$MOONRAKER_INSTALL" -eq 1 ]; then
         echo "ACE Manager REST API is available at:"
@@ -254,6 +327,11 @@ if [ "$UNINSTALL" -ne 1 ]; then
         echo "  - POST http://localhost:7125/server/ace/scan"
         echo ""
     fi
+    echo "Documentation:"
+    echo "  - USB_PORT_MAPPING_GUIDE.md  - USB port-based device mapping"
+    echo "  - DRYER_CONTROL_GUIDE.md     - Per-device dryer control"
+    echo "  - MIGRATION_GUIDE.md         - Fixing corrupted ace_vars.cfg"
+    echo ""
 else
     uninstall
 fi
