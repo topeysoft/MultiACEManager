@@ -314,45 +314,66 @@ class AceDeviceDiscovery:
     @staticmethod
     def _generate_device_id(device_info):
         """
-        Generate unique device ID from device info
-        Priority: MAC > Serial Number > USB Location > Firmware+Model hash
+        Generate device ID based on USB port location.
+        This ensures the same physical USB port always maps to the same device ID,
+        making gate assignments stable and predictable across reboots.
+
+        Format: hub_1_port_3 (readable) from USB location like "1-1.3"
         """
         import hashlib
 
-        # Best: MAC address (if available)
-        if 'mac_address' in device_info and device_info['mac_address']:
-            mac = device_info['mac_address'].replace(':', '')
-            return f"mac_{mac}"
-
-        # Good: Serial number
-        if 'serial_number' in device_info and device_info['serial_number']:
-            return f"sn_{device_info['serial_number']}"
-
-        # Better fallback: USB location (bus-port, unique per physical USB port)
+        # Always use USB location as the primary device ID
         if 'usb_location' in device_info and device_info['usb_location']:
             # USB location like "1-1.2" is stable as long as device stays in same port
-            usb_loc = device_info['usb_location'].replace('.', '_').replace('-', '_')
-            return f"usb_{usb_loc}"
+            # Convert to readable format: "1-1.2" → "hub_1_port_2"
+            usb_loc = device_info['usb_location']
 
-        # Last resort: Hash of firmware + model (NOT unique across identical devices)
-        # This will cause issues if you have multiple identical ACE units
+            # Parse USB location format (e.g., "1-1.2" means bus 1, port 1.2)
+            # We'll create a readable name based on the port path
+            parts = usb_loc.split('-')
+            if len(parts) >= 2:
+                # Get the port path (everything after the bus number)
+                port_path = parts[1].replace('.', '_')
+                return f"hub_{parts[0]}_port_{port_path}"
+            else:
+                # Fallback for simple format
+                usb_loc_clean = usb_loc.replace('.', '_').replace('-', '_')
+                return f"usb_{usb_loc_clean}"
+
+        # Fallback: MAC address (if firmware provides it)
+        if 'mac_address' in device_info and device_info['mac_address']:
+            mac = device_info['mac_address'].replace(':', '')
+            logging.info(f"ACE: Using MAC address for device_id (USB location not available)")
+            return f"mac_{mac}"
+
+        # Fallback: Serial number (if firmware provides it)
+        if 'serial_number' in device_info and device_info['serial_number']:
+            logging.info(f"ACE: Using serial number for device_id (USB location not available)")
+            return f"sn_{device_info['serial_number']}"
+
+        # Last resort: Hash of firmware + model (NOT recommended - not unique across identical devices)
         unique_str = f"{device_info.get('model', '')}_{device_info.get('firmware', '')}"
         hash_val = hashlib.md5(unique_str.encode()).hexdigest()[:8]
-        logging.warning(f"ACE: Using firmware hash for device_id (not unique!). Please ensure your ACE firmware reports MAC or Serial Number.")
+        logging.warning(f"ACE: Using firmware hash for device_id (not unique!). Consider using USB hub for stable port locations.")
         return f"fw_{hash_val}"
 
 
 class AceDeviceMapper:
-    """Manages persistent device ID to port mapping"""
+    """
+    Manages persistent device properties mapped by device ID (USB location).
+    Gate offsets are dynamically assigned at runtime based on currently connected devices.
+    Device properties (colors, materials, temps) persist with the device regardless of gate assignment.
+    """
 
     def __init__(self, config_path):
         self.config_path = config_path
-        self.device_map = {}  # device_id -> {port, gate_offset, last_seen}
+        self.device_map = {}  # device_id -> {port, usb_location, properties, last_seen, last_gate_offset}
         self.load()
 
     def load(self):
-        """Load device map from file"""
+        """Load device map and properties from file"""
         import configparser
+        import json
 
         if not os.path.exists(self.config_path):
             return
@@ -360,6 +381,7 @@ class AceDeviceMapper:
         parser = configparser.ConfigParser()
         parser.read(self.config_path)
 
+        # Load device metadata from main section (backward compatible)
         if parser.has_section('ace_device_map'):
             for device_id, value in parser.items('ace_device_map'):
                 if device_id.startswith('#'):
@@ -368,41 +390,106 @@ class AceDeviceMapper:
                 if len(parts) >= 2:
                     self.device_map[device_id] = {
                         'port': parts[0],
-                        'gate_offset': int(parts[1]) if len(parts) > 1 else 0,
-                        'last_seen': int(parts[2]) if len(parts) > 2 else 0
+                        'usb_location': parts[3] if len(parts) > 3 else '',
+                        'last_seen': int(parts[2]) if len(parts) > 2 else 0,
+                        'last_gate_offset': int(parts[1]) if len(parts) > 1 else 0,  # Informational only
+                        'properties': {}
                     }
 
+        # Load device-specific properties from individual sections
+        for section in parser.sections():
+            if section.startswith('device:'):
+                device_id = section[7:]  # Remove 'device:' prefix
+                if device_id not in self.device_map:
+                    self.device_map[device_id] = {
+                        'port': '',
+                        'usb_location': '',
+                        'last_seen': 0,
+                        'last_gate_offset': 0,
+                        'properties': {}
+                    }
+
+                # Load properties
+                props = {}
+                for key, value in parser.items(section):
+                    try:
+                        # Try to parse as JSON for lists
+                        props[key] = json.loads(value)
+                    except (json.JSONDecodeError, ValueError):
+                        # Store as string if not JSON
+                        props[key] = value
+
+                self.device_map[device_id]['properties'] = props
+
     def save(self):
-        """Save device map to file"""
+        """Save device map and properties to file"""
         import configparser
+        import json
 
         parser = configparser.ConfigParser()
-        parser.add_section('ace_device_map')
 
+        # Save main device mapping section
+        parser.add_section('ace_device_map')
         for device_id, info in sorted(self.device_map.items()):
-            value = f"{info['port']}, {info['gate_offset']}, {int(time.time())}"
+            value = f"{info['port']}, {info['last_gate_offset']}, {int(time.time())}, {info.get('usb_location', '')}"
             parser.set('ace_device_map', device_id, value)
+
+        # Save device-specific properties in separate sections
+        for device_id, info in sorted(self.device_map.items()):
+            if info.get('properties'):
+                section_name = f'device:{device_id}'
+                parser.add_section(section_name)
+                for prop_key, prop_value in info['properties'].items():
+                    # Serialize lists/dicts as JSON
+                    if isinstance(prop_value, (list, dict)):
+                        value_str = json.dumps(prop_value)
+                    else:
+                        value_str = str(prop_value)
+                    parser.set(section_name, prop_key, value_str)
 
         # Write with header comment
         with open(self.config_path, 'w') as f:
             f.write('# Auto-generated by ACE Manager - DO NOT EDIT MANUALLY\n')
-            f.write('# This file maps ACE device IDs to USB ports and gate offsets\n')
-            f.write('# It is automatically updated when devices are detected\n\n')
+            f.write('# This file stores device properties by USB port location\n')
+            f.write('# Gate offsets are dynamically assigned based on currently connected devices\n')
+            f.write('# Device properties (colors, materials, temps) persist with the device\n\n')
             parser.write(f)
 
-    def update_device(self, device_id, port, gate_offset=None):
+    def update_device(self, device_id, port, usb_location=None, current_gate_offset=None):
         """Update or add a device mapping"""
         if device_id not in self.device_map:
             self.device_map[device_id] = {
-                'gate_offset': gate_offset if gate_offset is not None else len(self.device_map) * 4
+                'port': port,
+                'usb_location': usb_location or '',
+                'last_seen': int(time.time()),
+                'last_gate_offset': current_gate_offset if current_gate_offset is not None else 0,
+                'properties': {}
             }
+        else:
+            self.device_map[device_id]['port'] = port
+            self.device_map[device_id]['usb_location'] = usb_location or self.device_map[device_id].get('usb_location', '')
+            self.device_map[device_id]['last_seen'] = int(time.time())
+            if current_gate_offset is not None:
+                self.device_map[device_id]['last_gate_offset'] = current_gate_offset
 
-        self.device_map[device_id]['port'] = port
-        self.device_map[device_id]['last_seen'] = int(time.time())
+    def get_device_properties(self, device_id):
+        """Get properties for a device"""
+        return self.device_map.get(device_id, {}).get('properties', {})
 
-    def get_port_for_device(self, device_id):
-        """Get the last known port for a device ID"""
-        return self.device_map.get(device_id, {}).get('port')
+    def update_device_properties(self, device_id, properties):
+        """Update properties for a device"""
+        if device_id in self.device_map:
+            self.device_map[device_id]['properties'].update(properties)
+        else:
+            logging.warning(f"ACE Mapper: Tried to update properties for unknown device {device_id}")
+
+    def get_device_info(self, device_id):
+        """Get full device info"""
+        return self.device_map.get(device_id, {})
+
+    def get_all_devices(self):
+        """Get all known devices"""
+        return self.device_map.copy()
 
     def find_device_by_port(self, port):
         """Find device ID by current port"""
@@ -1599,6 +1686,9 @@ class AceManager:
             'ACE_LIST_DEVICES', self.cmd_ACE_LIST_DEVICES,
             desc=self.cmd_ACE_LIST_DEVICES_help)
         self.gcode.register_command(
+            'ACE_SHOW_USB_INFO', self.cmd_ACE_SHOW_USB_INFO,
+            desc=self.cmd_ACE_SHOW_USB_INFO_help)
+        self.gcode.register_command(
             'ACE_REORDER_DEVICES', self.cmd_ACE_REORDER_DEVICES,
             desc=self.cmd_ACE_REORDER_DEVICES_help)
 
@@ -1940,20 +2030,115 @@ class AceManager:
                     map_file = os.path.join(config_dir, 'ace_device_map.cfg')
                     self.device_mapper = AceDeviceMapper(map_file)
 
-                    # Update device map with verified devices
+                    # Track configuration changes for user notification
+                    config_changes = []
+
+                    # Update device map with verified devices and track changes
                     for i, dev in enumerate(self._verified_devices):
                         device_id = dev['device_id']
                         port = dev['port']
-                        gate_offset = i * 4  # Gates 0-3, 4-7, etc.
+                        usb_location = dev.get('usb_location', '')
+                        current_gate_offset = i * 4  # Gates assigned based on current device order
 
-                        self.device_mapper.update_device(device_id, port, gate_offset)
-                        logging.info(f"ACE Manager: Mapped device {device_id} to {port} with gate offset {gate_offset}")
+                        # Check if this is a known device with previous configuration
+                        prev_info = self.device_mapper.get_device_info(device_id)
+                        if prev_info and 'last_gate_offset' in prev_info:
+                            prev_gate_offset = prev_info['last_gate_offset']
+                            if prev_gate_offset != current_gate_offset:
+                                config_changes.append({
+                                    'device_id': device_id,
+                                    'usb_location': usb_location,
+                                    'prev_gate_offset': prev_gate_offset,
+                                    'new_gate_offset': current_gate_offset
+                                })
+
+                        # Update device mapping with current configuration
+                        self.device_mapper.update_device(device_id, port, usb_location, current_gate_offset)
+                        logging.info(f"ACE Manager: Mapped device {device_id} to {port} at gates {current_gate_offset}-{current_gate_offset+3}")
+
+                    # Log configuration changes
+                    if config_changes:
+                        logging.info("=" * 60)
+                        logging.info("ACE Manager: Device configuration has changed since last boot")
+                        for change in config_changes:
+                            prev_gates = f"{change['prev_gate_offset']}-{change['prev_gate_offset']+3}"
+                            new_gates = f"{change['new_gate_offset']}-{change['new_gate_offset']+3}"
+                            logging.info(f"  {change['device_id']}: Gates {prev_gates} → {new_gates}")
+                        logging.info("Device properties (colors, materials, temps) will follow the device")
+                        logging.info("=" * 60)
+
+                    # Migrate device properties to current ACE instances
+                    # Properties persist with the device, not the gate offset
+                    self._migrate_device_properties_to_ace_instances()
 
                     # Save device map
                     self.device_mapper.save()
                     logging.info(f"ACE Manager: Device map saved to {map_file}")
 
         logging.info(f"ACE Manager: Managing {len(self.ace_devices)} ACE devices with {self.total_gates} total gates")
+
+    def _migrate_device_properties_to_ace_instances(self):
+        """
+        Migrate device properties from device mapper to ACE instances.
+        Device properties (colors, materials, temps) persist with the device,
+        not with the gate offset, so they follow the device when it changes ports.
+        """
+        if not hasattr(self, 'device_mapper'):
+            return
+
+        for ace_device in self.ace_devices:
+            device_id = ace_device.get('device_id')
+            if not device_id:
+                continue
+
+            ace_instance = ace_device.get('instance')
+            if not ace_instance:
+                continue
+
+            # Get stored properties for this device
+            device_props = self.device_mapper.get_device_properties(device_id)
+
+            if not device_props:
+                # No stored properties, initialize default properties from current ACE state
+                # and save them for future reference
+                if hasattr(ace_instance, 'save_variables'):
+                    current_colors = ace_instance.save_variables.allVariables.get('ace_gate_color', [])
+                    current_materials = ace_instance.save_variables.allVariables.get('ace_gate_type', [])
+                    current_temps = ace_instance.save_variables.allVariables.get('ace_gate_temp', [])
+
+                    if current_colors or current_materials or current_temps:
+                        device_props = {
+                            'gate_colors': current_colors,
+                            'gate_materials': current_materials,
+                            'gate_temps': current_temps
+                        }
+                        self.device_mapper.update_device_properties(device_id, device_props)
+                        logging.info(f"ACE Manager: Initialized properties for device {device_id}")
+                continue
+
+            # Apply stored properties to ACE instance
+            # Note: Properties are stored per-device (4 gates), not per global gate offset
+            if hasattr(ace_instance, 'save_variables'):
+                if 'gate_colors' in device_props and device_props['gate_colors']:
+                    ace_instance.save_variables.allVariables['ace_gate_color'] = device_props['gate_colors']
+                    logging.info(f"ACE Manager: Restored gate colors for device {device_id}")
+
+                if 'gate_materials' in device_props and device_props['gate_materials']:
+                    ace_instance.save_variables.allVariables['ace_gate_type'] = device_props['gate_materials']
+                    logging.info(f"ACE Manager: Restored gate materials for device {device_id}")
+
+                if 'gate_temps' in device_props and device_props['gate_temps']:
+                    ace_instance.save_variables.allVariables['ace_gate_temp'] = device_props['gate_temps']
+                    logging.info(f"ACE Manager: Restored gate temperatures for device {device_id}")
+
+                # Also update the gate colors/materials on the ACE device itself
+                # This will sync the properties to the physical device
+                if hasattr(ace_instance, 'gate_color'):
+                    ace_instance.gate_color = device_props.get('gate_colors', ace_instance.gate_color)
+                if hasattr(ace_instance, 'gate_material'):
+                    ace_instance.gate_material = device_props.get('gate_materials', ace_instance.gate_material)
+                if hasattr(ace_instance, 'gate_temp'):
+                    ace_instance.gate_temp = device_props.get('gate_temps', ace_instance.gate_temp)
 
     def _handle_connect(self):
         """Handle Klipper connection - attempt to reconnect to ACE devices if they moved ports"""
@@ -2494,6 +2679,126 @@ class AceManager:
                 self.gcode.respond_info(f"   Uptime: {uptime_hours}h {uptime_mins}m")
             if health.get('error_count') is not None:
                 self.gcode.respond_info(f"   Errors: {health['error_count']}")
+
+    cmd_ACE_SHOW_USB_INFO_help = 'Show USB topology and device mapping information'
+
+    def cmd_ACE_SHOW_USB_INFO(self, gcmd):
+        """Show detailed USB port location and device mapping information"""
+        self.gcode.respond_info("=" * 70)
+        self.gcode.respond_info("ACE USB Port Mapping & Device Topology")
+        self.gcode.respond_info("=" * 70)
+
+        if not hasattr(self, 'device_mapper') or not self.device_mapper:
+            self.gcode.respond_info("Device mapper not initialized (auto_detect not enabled)")
+            return
+
+        # Get all known devices from mapper
+        all_devices = self.device_mapper.get_all_devices()
+
+        # Show currently connected devices
+        self.gcode.respond_info("\nCurrently Connected Devices:")
+        self.gcode.respond_info("-" * 70)
+
+        for i, ace_device in enumerate(self.ace_devices):
+            device_id = ace_device.get('device_id', 'unknown')
+            port = ace_device.get('port', 'unknown')
+            gate_offset = ace_device.get('gate_offset', 0)
+            gates_str = f"{gate_offset}-{gate_offset + 3}"
+
+            device_info = self.device_mapper.get_device_info(device_id)
+            usb_location = device_info.get('usb_location', 'N/A') if device_info else 'N/A'
+
+            # Determine device ID type
+            id_type = "Unknown"
+            id_quality = "⚠"
+            if device_id.startswith('mac_'):
+                id_type = "MAC Address"
+                id_quality = "✓"
+            elif device_id.startswith('sn_'):
+                id_type = "Serial Number"
+                id_quality = "✓"
+            elif device_id.startswith('hub_') or device_id.startswith('usb_'):
+                id_type = "USB Location"
+                id_quality = "✓"
+            elif device_id.startswith('fw_'):
+                id_type = "Firmware Hash"
+                id_quality = "❌"
+
+            self.gcode.respond_info(f"\n{id_quality} Device {i+1}: {device_id}")
+            self.gcode.respond_info(f"   ID Type:      {id_type}")
+            self.gcode.respond_info(f"   USB Location: {usb_location}")
+            self.gcode.respond_info(f"   Serial Port:  {port}")
+            self.gcode.respond_info(f"   Gate Range:   {gates_str}")
+
+            # Show device properties if available
+            if device_info and 'properties' in device_info:
+                props = device_info['properties']
+                if props.get('gate_materials'):
+                    materials_str = ', '.join([m or 'None' for m in props['gate_materials']])
+                    self.gcode.respond_info(f"   Materials:    [{materials_str}]")
+                if props.get('gate_colors'):
+                    colors_str = ', '.join([c or 'FFFFFF' for c in props['gate_colors']])
+                    self.gcode.respond_info(f"   Colors:       [{colors_str}]")
+
+        # Show historical/disconnected devices
+        disconnected_devices = []
+        for device_id, info in all_devices.items():
+            # Check if this device is currently connected
+            is_connected = any(d.get('device_id') == device_id for d in self.ace_devices)
+            if not is_connected:
+                disconnected_devices.append((device_id, info))
+
+        if disconnected_devices:
+            self.gcode.respond_info("\n" + "=" * 70)
+            self.gcode.respond_info("Previously Seen Devices (Not Currently Connected):")
+            self.gcode.respond_info("-" * 70)
+
+            for device_id, info in disconnected_devices:
+                usb_location = info.get('usb_location', 'N/A')
+                last_port = info.get('port', 'unknown')
+                last_gate_offset = info.get('last_gate_offset', 0)
+                last_seen = info.get('last_seen', 0)
+
+                import time
+                if last_seen > 0:
+                    time_diff = int(time.time()) - last_seen
+                    if time_diff < 60:
+                        time_ago = f"{time_diff}s ago"
+                    elif time_diff < 3600:
+                        time_ago = f"{time_diff // 60}m ago"
+                    elif time_diff < 86400:
+                        time_ago = f"{time_diff // 3600}h ago"
+                    else:
+                        time_ago = f"{time_diff // 86400}d ago"
+                else:
+                    time_ago = "unknown"
+
+                self.gcode.respond_info(f"\n⊗ Device: {device_id}")
+                self.gcode.respond_info(f"   USB Location:    {usb_location}")
+                self.gcode.respond_info(f"   Last Port:       {last_port}")
+                self.gcode.respond_info(f"   Last Gate Offset: {last_gate_offset}-{last_gate_offset + 3}")
+                self.gcode.respond_info(f"   Last Seen:       {time_ago}")
+
+        # Show summary
+        self.gcode.respond_info("\n" + "=" * 70)
+        self.gcode.respond_info("Summary:")
+        self.gcode.respond_info("-" * 70)
+        self.gcode.respond_info(f"Total Connected Devices:  {len(self.ace_devices)}")
+        self.gcode.respond_info(f"Total Gates Available:    {self.total_gates}")
+        self.gcode.respond_info(f"Known Devices (Total):    {len(all_devices)}")
+        self.gcode.respond_info(f"Disconnected Devices:     {len(disconnected_devices)}")
+
+        # Show warnings if using firmware hash IDs
+        firmware_hash_devices = [d for d in self.ace_devices if d.get('device_id', '').startswith('fw_')]
+        if firmware_hash_devices:
+            self.gcode.respond_info("\n⚠ WARNING: Some devices are using firmware hash IDs")
+            self.gcode.respond_info("   This is not reliable for multiple identical devices.")
+            self.gcode.respond_info("   Consider using a USB hub to enable USB location-based IDs.")
+
+        self.gcode.respond_info("\n" + "=" * 70)
+        self.gcode.respond_info("Device properties (colors, materials, temps) persist with each device")
+        self.gcode.respond_info("Gate offsets are dynamically assigned based on connected device order")
+        self.gcode.respond_info("=" * 70)
 
     cmd_ACE_REORDER_DEVICES_help = 'Reorder ACE device gate assignments'
 
