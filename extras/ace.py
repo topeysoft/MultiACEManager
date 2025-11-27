@@ -2520,6 +2520,13 @@ class AceManager:
                 'gate_offset_map': {}
             }
 
+        # Build map of currently connected ports to device info
+        current_port_map = {}
+        for dev in current_devices:
+            port = dev.get('port')
+            if port:
+                current_port_map[port] = dev
+
         # Probe and verify each discovered device
         verified_devices = []
         for device_info in discovered:
@@ -2529,24 +2536,64 @@ class AceManager:
             if not port:
                 continue
 
-            try:
-                # Probe the device
-                probe_result = AceDeviceDiscovery.probe_ace_device(port, baud=self.baud, usb_location=usb_location)
-                if probe_result:
-                    device_id = probe_result['device_id']
+            # Check if this port is already connected
+            if port in current_port_map:
+                # Device is currently connected - use existing info instead of probing
+                # (probing would fail because serial port is already open)
+                existing_dev = current_port_map[port]
+                device_id = existing_dev.get('device_id')
 
-                    verified_devices.append({
-                        'device_id': device_id,
-                        'port': port,
-                        'usb_location': usb_location or '',
-                        'firmware_version': probe_result.get('firmware', 'unknown'),
-                        'model': probe_result.get('model', 'ACE'),
-                        'device_info': device_info,
-                        'probe_result': probe_result
-                    })
-                    logging.info(f"ACE Manager: Verified device {device_id} at {port}")
-            except Exception as e:
-                logging.error(f"ACE Manager: Failed to probe device at {port}: {e}")
+                # Get firmware and model from the ACE instance if available
+                ace_instance = existing_dev.get('instance')
+                firmware_version = 'unknown'
+                model = 'ACE'
+
+                if ace_instance and hasattr(ace_instance, 'get_status'):
+                    try:
+                        status = ace_instance.get_status()
+                        firmware_version = status.get('firmware', 'unknown')
+                        model = status.get('model', 'ACE')
+                    except:
+                        pass
+
+                # Try to get USB location from device_mapper if available
+                existing_usb_location = ''
+                if hasattr(self, 'device_mapper') and self.device_mapper:
+                    device_info_from_mapper = self.device_mapper.get_device_info(device_id)
+                    if device_info_from_mapper:
+                        existing_usb_location = device_info_from_mapper.get('usb_location', '')
+
+                verified_devices.append({
+                    'device_id': device_id,
+                    'port': port,
+                    'usb_location': usb_location or existing_usb_location,
+                    'firmware_version': firmware_version,
+                    'model': model,
+                    'device_info': device_info,
+                    'probe_result': None,  # Using existing connection
+                    'existing': True
+                })
+                logging.info(f"ACE Manager: Using existing device {device_id} at {port}")
+            else:
+                # New device - probe it
+                try:
+                    probe_result = AceDeviceDiscovery.probe_ace_device(port, baud=self.baud, usb_location=usb_location)
+                    if probe_result:
+                        device_id = probe_result['device_id']
+
+                        verified_devices.append({
+                            'device_id': device_id,
+                            'port': port,
+                            'usb_location': usb_location or '',
+                            'firmware_version': probe_result.get('firmware', 'unknown'),
+                            'model': probe_result.get('model', 'ACE'),
+                            'device_info': device_info,
+                            'probe_result': probe_result,
+                            'existing': False
+                        })
+                        logging.info(f"ACE Manager: Verified new device {device_id} at {port}")
+                except Exception as e:
+                    logging.error(f"ACE Manager: Failed to probe device at {port}: {e}")
 
         if not verified_devices:
             logging.error("ACE Manager: No ACE devices could be verified")
