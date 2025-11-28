@@ -3073,6 +3073,9 @@ class AceManager:
                 # Set device_id on the ACE instance for device-specific variable names
                 ace_instance.device_id = device_id
 
+                # Initialize connection since klippy:ready has already fired
+                ace_instance._handle_ready()
+
                 # Store device info
                 self.ace_devices.append({
                     'name': ace_name,
