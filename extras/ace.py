@@ -1577,6 +1577,12 @@ class BunnyAce:
                     self.save_variables.allVariables[temp_var] = [0, 0, 0, 0]
                 self.save_variables.allVariables[temp_var][gate] = temp
             self.write_variables()
+
+            # Force a status update notification to connected clients (KlipperScreen, Mainsail, etc.)
+            # by incrementing a dummy counter that triggers Klipper's status change detection
+            if 'gate_map_update_counter' not in self._info:
+                self._info['gate_map_update_counter'] = 0
+            self._info['gate_map_update_counter'] += 1
         else:
             gcmd.respond_info('ACE_MAP' + str(gate))
 
@@ -3322,6 +3328,13 @@ class AceManager:
                 if (color or type_param or temp) and hasattr(ace_instance, 'write_variables'):
                     ace_instance.write_variables()
 
+                    # Force a status update notification to connected clients (KlipperScreen, Mainsail, etc.)
+                    # by incrementing a dummy counter that triggers Klipper's status change detection
+                    if hasattr(ace_instance, '_info'):
+                        if 'gate_map_update_counter' not in ace_instance._info:
+                            ace_instance._info['gate_map_update_counter'] = 0
+                        ace_instance._info['gate_map_update_counter'] += 1
+
             logging.info(f"ACE Manager: Updated gate {gate} on device {device_id} (local gate {local_gate})")
         else:
             # Fallback to old method if device mapper not available
@@ -3334,6 +3347,14 @@ class AceManager:
 
             if color or type_param or temp:
                 ace_instance.write_variables()
+
+                # Force a status update notification to connected clients (KlipperScreen, Mainsail, etc.)
+                # by incrementing a dummy counter that triggers Klipper's status change detection
+                if hasattr(ace_instance, '_info'):
+                    if 'gate_map_update_counter' not in ace_instance._info:
+                        ace_instance._info['gate_map_update_counter'] = 0
+                    ace_instance._info['gate_map_update_counter'] += 1
+
                 logging.info(f"ACE Manager: Updated gate {gate} (local gate {local_gate})")
 
     cmd_ACE_SCAN_DEVICES_help = 'Scan for ACE devices and optionally apply changes (use APPLY=1 to hot-reload)'
