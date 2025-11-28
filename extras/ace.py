@@ -1813,6 +1813,17 @@ class AceManager:
         self.gcode.register_command(
             'ACE_GET_DRYER_STATUS', self.cmd_ACE_GET_DRYER_STATUS,
             desc=self.cmd_ACE_GET_DRYER_STATUS_help)
+        # Feed assist commands
+        self.gcode.register_command(
+            'ACE_ENABLE_FEED_ASSIST', self.cmd_ACE_ENABLE_FEED_ASSIST,
+            desc=self.cmd_ACE_ENABLE_FEED_ASSIST_help)
+        self.gcode.register_command(
+            'ACE_DISABLE_FEED_ASSIST', self.cmd_ACE_DISABLE_FEED_ASSIST,
+            desc=self.cmd_ACE_DISABLE_FEED_ASSIST_help)
+        # Endless spool command
+        self.gcode.register_command(
+            'ACE_ENDLESS_SPOOL', self.cmd_ACE_ENDLESS_SPOOL,
+            desc=self.cmd_ACE_ENDLESS_SPOOL_help)
 
     def _setup_from_serial_ports(self, config, serial_ports_str):
         """Setup ACE devices from comma-separated serial port list"""
@@ -3356,6 +3367,66 @@ class AceManager:
                     ace_instance._info['gate_map_update_counter'] += 1
 
                 logging.info(f"ACE Manager: Updated gate {gate} (local gate {local_gate})")
+
+    cmd_ACE_ENDLESS_SPOOL_help = 'Enable/disable endless spool (unified across all ACE devices)'
+
+    def cmd_ACE_ENDLESS_SPOOL(self, gcmd):
+        """Enable/disable endless spool - applies to first ACE device (global setting)"""
+        enable = gcmd.get_int('ENABLE', 1)
+
+        # Apply to first ACE device (endless spool is a global setting)
+        if self.ace_devices:
+            first_ace = self.ace_devices[0]['instance']
+            if hasattr(first_ace, 'save_variables'):
+                first_ace.save_variable('ace_endless_spool', bool(enable), True)
+                logging.info(f"ACE Manager: Endless spool {'enabled' if enable else 'disabled'}")
+        else:
+            self.gcode.respond_info("Error: No ACE devices available")
+
+    cmd_ACE_ENABLE_FEED_ASSIST_help = 'Enable feed assist for a specific gate (unified across all ACE devices)'
+
+    def cmd_ACE_ENABLE_FEED_ASSIST(self, gcmd):
+        """Enable feed assist - routes to correct ACE based on global gate number"""
+        gate = gcmd.get_int('INDEX')
+
+        # Route to correct ACE instance
+        ace_instance, local_gate = self._route_to_ace(gate)
+
+        # Call the ACE instance's enable feed assist method
+        if hasattr(ace_instance, '_enable_feed_assist'):
+            ace_instance._enable_feed_assist(local_gate)
+            logging.info(f"ACE Manager: Enabled feed assist for gate {gate} (local gate {local_gate})")
+        else:
+            self.gcode.respond_info("Error: Feed assist not supported on this ACE instance")
+
+    cmd_ACE_DISABLE_FEED_ASSIST_help = 'Disable feed assist (unified across all ACE devices)'
+
+    def cmd_ACE_DISABLE_FEED_ASSIST(self, gcmd):
+        """Disable feed assist - routes to correct ACE or uses current feed assist gate"""
+        gate = gcmd.get_int('INDEX', None)
+
+        if gate is None:
+            # If no gate specified, try to find which ACE has feed assist active
+            for device in self.ace_devices:
+                ace = device['instance']
+                if hasattr(ace, '_feed_assist_index') and ace._feed_assist_index != -1:
+                    local_gate = ace._feed_assist_index
+                    global_gate = device['gate_offset'] + local_gate
+                    if hasattr(ace, '_disable_feed_assist'):
+                        ace._disable_feed_assist(local_gate)
+                        logging.info(f"ACE Manager: Disabled feed assist for gate {global_gate}")
+                        return
+            self.gcode.respond_info("Error: No active feed assist found")
+        else:
+            # Route to correct ACE instance
+            ace_instance, local_gate = self._route_to_ace(gate)
+
+            # Call the ACE instance's disable feed assist method
+            if hasattr(ace_instance, '_disable_feed_assist'):
+                ace_instance._disable_feed_assist(local_gate)
+                logging.info(f"ACE Manager: Disabled feed assist for gate {gate} (local gate {local_gate})")
+            else:
+                self.gcode.respond_info("Error: Feed assist not supported on this ACE instance")
 
     cmd_ACE_SCAN_DEVICES_help = 'Scan for ACE devices and optionally apply changes (use APPLY=1 to hot-reload)'
 
