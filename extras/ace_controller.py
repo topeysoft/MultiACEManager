@@ -140,12 +140,26 @@ class AceController:
         """
         Create a filament sensor.
 
+        Checks if sensor already exists (created by another plugin/config section).
+        If exists, reuses it. If not, creates a new one.
+
         Args:
             pin: MCU pin for sensor
             name: Sensor name
             handler: Optional event handler callback
         """
         section = f"filament_switch_sensor {name}"
+
+        # Check if sensor already exists
+        existing_sensor = self.printer.lookup_object(section, None)
+        if existing_sensor:
+            logging.info(f"AceController: ♻ Reusing existing sensor '{name}' (created by another plugin/config)")
+            # Store reference to existing sensor's endstop if available
+            if hasattr(existing_sensor, 'pin'):
+                self.endstops[name] = existing_sensor.pin
+            return
+
+        # Sensor doesn't exist, create new one
         logging.info(f"AceController: Creating sensor '{name}' on pin '{pin}'")
 
         # Create runout helper
