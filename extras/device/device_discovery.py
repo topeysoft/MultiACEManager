@@ -75,7 +75,7 @@ class AceDeviceDiscovery:
             # Method 1: VID/PID matching (most reliable)
             if port.vid == AceDeviceDiscovery.ACE_VID:
                 logging.info(f"    ✓ Matched by VID (0x{AceDeviceDiscovery.ACE_VID:04X})")
-                ace_devices.append({
+                device_info = {
                     'port': port.device,
                     'hwid': port.hwid,
                     'serial_number': port.serial_number,
@@ -83,13 +83,17 @@ class AceDeviceDiscovery:
                     'product': port.product,
                     'vid': port.vid,
                     'pid': port.pid,
-                    'location': port.location  # USB hub location for stable ordering
-                })
+                    'location': port.location,  # USB hub location for stable ordering
+                    'usb_location': port.location
+                }
+                # Generate device_id
+                device_info['device_id'] = AceDeviceDiscovery._generate_device_id(device_info)
+                ace_devices.append(device_info)
             # Method 2: Manufacturer/Product string matching (fallback)
             elif (port.manufacturer and AceDeviceDiscovery.ACE_MANUFACTURER.upper() in str(port.manufacturer).upper()) or \
                  (port.product and AceDeviceDiscovery.ACE_PRODUCT_NAME.upper() in str(port.product).upper()):
                 logging.info(f"    ✓ Matched by manufacturer/product string")
-                ace_devices.append({
+                device_info = {
                     'port': port.device,
                     'hwid': port.hwid,
                     'serial_number': port.serial_number,
@@ -97,8 +101,12 @@ class AceDeviceDiscovery:
                     'product': port.product,
                     'vid': port.vid,
                     'pid': port.pid,
-                    'location': port.location
-                })
+                    'location': port.location,
+                    'usb_location': port.location
+                }
+                # Generate device_id
+                device_info['device_id'] = AceDeviceDiscovery._generate_device_id(device_info)
+                ace_devices.append(device_info)
             else:
                 logging.info(f"    ✗ No match (looking for VID=0x{AceDeviceDiscovery.ACE_VID:04X} or mfr='{AceDeviceDiscovery.ACE_MANUFACTURER}' or product='{AceDeviceDiscovery.ACE_PRODUCT_NAME}')")
 

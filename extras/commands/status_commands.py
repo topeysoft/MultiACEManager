@@ -171,24 +171,34 @@ class StatusCommands:
         ACE_SCAN_DEVICES
 
         Scan USB ports for ACE devices and display results.
+
+        WARNING: This command performs blocking USB I/O and may take several seconds.
         """
         self.gcode.respond_info('Scanning for ACE devices...')
+        self.gcode.respond_info('(This may take a few seconds...)')
 
-        discovered = AceDeviceDiscovery.find_ace_devices()
+        try:
+            discovered = AceDeviceDiscovery.find_ace_devices()
 
-        if not discovered:
-            self.gcode.respond_info('No ACE devices found')
-            return
+            if not discovered:
+                self.gcode.respond_info('No ACE devices found')
+                return
 
-        self.gcode.respond_info(f'Found {len(discovered)} ACE device(s):')
-        for i, dev in enumerate(discovered):
-            self.gcode.respond_info(f'\nDevice {i+1}:')
-            self.gcode.respond_info(f'  Port: {dev["port"]}')
-            self.gcode.respond_info(f'  Device ID: {dev["device_id"]}')
-            if dev.get('usb_location'):
-                self.gcode.respond_info(f'  USB Location: {dev["usb_location"]}')
-            if dev.get('serial_number'):
-                self.gcode.respond_info(f'  Serial: {dev["serial_number"]}')
+            self.gcode.respond_info(f'Found {len(discovered)} ACE device(s):')
+            for i, dev in enumerate(discovered):
+                self.gcode.respond_info(f'\nDevice {i+1}:')
+                self.gcode.respond_info(f'  Port: {dev["port"]}')
+                self.gcode.respond_info(f'  Device ID: {dev["device_id"]}')
+                if dev.get('usb_location'):
+                    self.gcode.respond_info(f'  USB Location: {dev["usb_location"]}')
+                if dev.get('serial_number'):
+                    self.gcode.respond_info(f'  Serial: {dev["serial_number"]}')
+
+        except Exception as e:
+            logging.error(f'ACE_SCAN_DEVICES error: {e}')
+            import traceback
+            logging.error(traceback.format_exc())
+            raise gcmd.error(f'Failed to scan devices: {e}')
 
     def cmd_ACE_LIST_DEVICES(self, gcmd):
         """
@@ -217,26 +227,35 @@ class StatusCommands:
 
         Show USB topology and device-to-port mapping.
         """
-        self.gcode.respond_info('=== USB Device Mapping ===\n')
+        try:
+            self.gcode.respond_info('=== USB Device Mapping ===\n')
 
-        # Show currently configured devices
-        status = self.device_manager.get_aggregated_status()
-        self.gcode.respond_info(f'Configured Devices: {status["num_devices"]}')
+            # Show currently configured devices
+            status = self.device_manager.get_aggregated_status()
+            self.gcode.respond_info(f'Configured Devices: {status["num_devices"]}')
 
-        for i, dev in enumerate(status['devices']):
-            self.gcode.respond_info(f'\n{dev["name"]}:')
-            self.gcode.respond_info(f'  Port: {dev.get("port", "N/A")}')
-            self.gcode.respond_info(f'  Gates: {dev["gate_offset"]}-{dev["gate_offset"]+3}')
-            self.gcode.respond_info(f'  USB Location: {dev.get("usb_location", "Unknown")}')
-            self.gcode.respond_info(f'  Connection: {"✓ Active" if dev["connected"] else "✗ Inactive"}')
+            for i, dev in enumerate(status['devices']):
+                self.gcode.respond_info(f'\n{dev["name"]}:')
+                self.gcode.respond_info(f'  Port: {dev.get("port", "N/A")}')
+                self.gcode.respond_info(f'  Gates: {dev["gate_offset"]}-{dev["gate_offset"]+3}')
+                self.gcode.respond_info(f'  USB Location: {dev.get("usb_location", "Unknown")}')
+                self.gcode.respond_info(f'  Connection: {"✓ Active" if dev["connected"] else "✗ Inactive"}')
 
-        # Scan for all ACE devices
-        self.gcode.respond_info('\n=== USB Scan Results ===')
-        discovered = AceDeviceDiscovery.find_ace_devices()
+            # Scan for all ACE devices
+            self.gcode.respond_info('\n=== USB Scan Results ===')
+            self.gcode.respond_info('(Scanning USB ports...)')
 
-        if discovered:
-            self.gcode.respond_info(f'Found {len(discovered)} ACE device(s) on USB:')
-            for dev in discovered:
-                self.gcode.respond_info(f'  - {dev["port"]} ({dev["device_id"]})')
-        else:
-            self.gcode.respond_info('No ACE devices detected on USB')
+            discovered = AceDeviceDiscovery.find_ace_devices()
+
+            if discovered:
+                self.gcode.respond_info(f'Found {len(discovered)} ACE device(s) on USB:')
+                for dev in discovered:
+                    self.gcode.respond_info(f'  - {dev["port"]} ({dev["device_id"]})')
+            else:
+                self.gcode.respond_info('No ACE devices detected on USB')
+
+        except Exception as e:
+            logging.error(f'ACE_SHOW_USB_INFO error: {e}')
+            import traceback
+            logging.error(traceback.format_exc())
+            raise gcmd.error(f'Failed to show USB info: {e}')
