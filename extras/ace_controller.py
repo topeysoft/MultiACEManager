@@ -188,7 +188,7 @@ class AceController:
             try:
                 query_endstops = self.printer.lookup_object('query_endstops')
                 if query_endstops:
-                    query_endstops.register_endstop(mcu_endstop, share_name)
+                    query_endstops.register_endstop(mcu_endstop, name)
                     logging.info(f"AceController: ✓ Registered sensor '{name}'")
             except Exception as e:
                 logging.error(f"AceController: Failed to register sensor '{name}': {e}")
