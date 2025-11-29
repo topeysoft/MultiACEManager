@@ -20,6 +20,7 @@ from ..protocol.constants import (
     CONNECT_RETRY_BACKOFF,
     READER_POLL_INTERVAL,
     WRITER_POLL_INTERVAL,
+    CONNECTION_DEBOUNCE_TIME,
     REQUEST_TIMEOUT,
     MAX_REQUEST_ID,
     GATES_PER_ACE
@@ -69,6 +70,8 @@ class AceDevice:
         # Hardware state
         self._serial = None
         self._connected = False
+        self._stable_connected = False  # Debounced connection state for UI
+        self._connection_state_timestamp = 0.0  # When connection state last changed
         self._lock = threading.Lock()
         self._request_in_flight = False
         self._pending_request_id: Optional[int] = None
@@ -166,6 +169,7 @@ class AceDevice:
             if self._serial.is_open:
                 # Reset state for new connection
                 self._connected = True
+                self._connection_state_timestamp = self.reactor.monotonic()  # Track when state changed
                 self._request_id = 0
                 self._connection_retry_count = 0
                 self._connection_retry_backoff = 1.0
@@ -194,6 +198,8 @@ class AceDevice:
 
         except serial.serialutil.SerialException as e:
             self._serial = None
+            if self._connected:  # Only update timestamp if state actually changed
+                self._connection_state_timestamp = self.reactor.monotonic()
             self._connected = False
             self._connection_retry_count += 1
 
@@ -242,6 +248,8 @@ class AceDevice:
             logging.error(f"AceDevice: Error closing serial port: {e}")
         finally:
             self._serial = None
+            if self._connected:  # Only update timestamp if state actually changed
+                self._connection_state_timestamp = self.reactor.monotonic()
             self._connected = False
 
         try:
@@ -265,8 +273,27 @@ class AceDevice:
             self._request_id = 0
         return self._request_id
 
+    def _update_stable_connection_state(self, eventtime: float) -> None:
+        """
+        Update the stable (debounced) connection state.
+
+        Only updates _stable_connected if the current _connected state has been
+        stable for at least CONNECTION_DEBOUNCE_TIME seconds.
+        """
+        time_in_current_state = eventtime - self._connection_state_timestamp
+
+        # If connection state has been stable long enough, update stable state
+        if time_in_current_state >= CONNECTION_DEBOUNCE_TIME:
+            if self._stable_connected != self._connected:
+                self._stable_connected = self._connected
+                state_str = "connected" if self._stable_connected else "disconnected"
+                logging.info(f"AceDevice: Stable connection state changed to {state_str} for {self.serial_id}")
+
     def _reader(self, eventtime):
         """Read and process responses from ACE device"""
+        # Update stable connection state for UI
+        self._update_stable_connection_state(eventtime)
+
         # Check for request timeout
         with self._lock:
             if self._request_in_flight and self.send_time and (self.reactor.monotonic() - self.send_time) > REQUEST_TIMEOUT:
@@ -342,6 +369,9 @@ class AceDevice:
 
     def _writer(self, eventtime):
         """Send requests to ACE device and poll status"""
+        # Update stable connection state for UI
+        self._update_stable_connection_state(eventtime)
+
         # Check connection state first
         if not self._connected or self._serial is None or not self._serial.is_open:
             logging.debug(f"AceDevice: Writer skipping - device not connected")
@@ -606,7 +636,7 @@ class AceDevice:
         Get current device status (synchronous).
 
         Returns:
-            Device status dictionary
+            Device status dictionary with debounced connection state
         """
         return {
             'status': self._info['status'],
@@ -617,5 +647,5 @@ class AceDevice:
             'slots': self._info.get('slots', []),
             'device_id': self.device_id,
             'port': self.serial_id,
-            'connected': self._connected
+            'connected': self._stable_connected  # Use debounced state to prevent UI flickering
         }

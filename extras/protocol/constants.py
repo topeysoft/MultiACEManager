@@ -17,6 +17,7 @@ CONNECT_RETRY_BACKOFF = 1.5  # Exponential backoff multiplier
 READER_POLL_INTERVAL = 2.0  # Increased from 0.5s to prevent UI state flickering
 WRITER_POLL_INTERVAL = 3.0  # Increased from 1.0s to prevent UI state flickering
 SENSOR_POLL_INTERVAL = 2.0  # Increased from 0.5s to prevent UI state flickering
+CONNECTION_DEBOUNCE_TIME = 3.0  # Seconds of stability required before reporting state change to UI
 REQUEST_TIMEOUT = 2.0
 FEED_ASSIST_DELAY = 0.7
 FEED_ASSIST_DISABLE_DELAY = 0.3
