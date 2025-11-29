@@ -99,9 +99,9 @@ class AceController:
         toolhead_sensor_pin = config.get('toolhead_sensor_pin', None)
 
         if extruder_sensor_pin:
-            self.extruder_sensor = self._create_sensor(extruder_sensor_pin, "extruder_sensor", self._extruder_sensor_handler)
+            self.extruder_sensor = self._create_sensor(config, extruder_sensor_pin, "extruder_sensor", self._extruder_sensor_handler)
         if toolhead_sensor_pin:
-            self.toolhead_sensor = self._create_sensor(toolhead_sensor_pin, "toolhead_sensor", None)
+            self.toolhead_sensor = self._create_sensor(config, toolhead_sensor_pin, "toolhead_sensor", None)
 
         # Current state
         self.current_tool = -1
@@ -136,11 +136,12 @@ class AceController:
         self.device_manager.disconnect_all()
         logging.info('AceController: Disconnected')
 
-    def _create_sensor(self, pin, name, handler):
+    def _create_sensor(self, config, pin, name, handler):
         """
         Create a filament sensor.
 
         Args:
+            config: Klipper configuration object
             pin: MCU pin for sensor
             name: Sensor name
             handler: Optional event handler callback
@@ -148,32 +149,25 @@ class AceController:
         section = f"filament_switch_sensor {name}"
         logging.info(f"AceController: Creating sensor '{name}' on pin '{pin}'")
 
-        # Create runout helper
+        # Add sensor section to config dynamically
+        config.fileconfig.add_section(section)
+        config.fileconfig.set(section, "switch_pin", pin)
+        config.fileconfig.set(section, "pause_on_runout", "False")
+
+        # Load the actual Klipper filament_switch_sensor object
+        fs = self.printer.load_object(config, section)
+
+        # Create custom runout helper for ACE-specific behavior
         ro_helper = MmuRunoutHelper(
             self.printer, name, 0.1, '', '', '',
             False, handler, pin
         )
 
-        # Create minimal sensor object
-        class MinimalSensor:
-            def __init__(self, helper, endstop_pin):
-                self.runout_helper = helper
-                self.get_status = helper.get_status
-                self.name = helper.name
-                self.pin = endstop_pin
-                # Explicitly mark this as NOT a probe to prevent QUERY_PROBE attempts
-                self.multi_probe_pending = False
+        # Replace the sensor's runout helper with our custom one
+        fs.runout_helper = ro_helper
+        fs.get_status = ro_helper.get_status
 
-            # Expose the runout helper's commands for Mainsail compatibility
-            @property
-            def cmd_QUERY_FILAMENT_SENSOR(self):
-                return self.runout_helper.cmd_QUERY_FILAMENT_SENSOR
-
-            @property
-            def cmd_SET_FILAMENT_SENSOR(self):
-                return self.runout_helper.cmd_SET_FILAMENT_SENSOR
-
-        # Set up endstop pin
+        # Set up endstop pin for multi-use (shared with sensor)
         ppins = self.printer.lookup_object('pins')
         try:
             pin_params = ppins.parse_pin(pin, True, True)
@@ -185,26 +179,14 @@ class AceController:
             logging.error(f"AceController: Failed to setup pin '{pin}' for sensor '{name}': {e}")
             raise
 
-        # Create sensor object
-        fs = MinimalSensor(ro_helper, mcu_endstop)
-
         # Store endstop
         self.endstops[name] = mcu_endstop
 
-        # Store in printer objects
-        self.printer.objects[section] = fs
-
         # Register with query_endstops
-        def register_endstop():
-            try:
-                query_endstops = self.printer.lookup_object('query_endstops')
-                if query_endstops:
-                    query_endstops.register_endstop(mcu_endstop, name)
-                    logging.info(f"AceController: ✓ Registered sensor '{name}'")
-            except Exception as e:
-                logging.error(f"AceController: Failed to register sensor '{name}': {e}")
+        query_endstops = self.printer.load_object(config, "query_endstops")
+        query_endstops.register_endstop(mcu_endstop, share_name)
 
-        self.printer.register_event_handler("klippy:ready", register_endstop)
+        logging.info(f"AceController: ✓ Registered sensor '{name}'")
 
         return fs
 
