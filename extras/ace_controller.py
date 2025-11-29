@@ -99,9 +99,9 @@ class AceController:
         toolhead_sensor_pin = config.get('toolhead_sensor_pin', None)
 
         if extruder_sensor_pin:
-            self._create_sensor(extruder_sensor_pin, "extruder_sensor", self._extruder_sensor_handler)
+            self.extruder_sensor = self._create_sensor(extruder_sensor_pin, "extruder_sensor", self._extruder_sensor_handler)
         if toolhead_sensor_pin:
-            self._create_sensor(toolhead_sensor_pin, "toolhead_sensor", None)
+            self.toolhead_sensor = self._create_sensor(toolhead_sensor_pin, "toolhead_sensor", None)
 
         # Current state
         self.current_tool = -1
@@ -140,26 +140,12 @@ class AceController:
         """
         Create a filament sensor.
 
-        Checks if sensor already exists (created by another plugin/config section).
-        If exists, reuses it. If not, creates a new one.
-
         Args:
             pin: MCU pin for sensor
             name: Sensor name
             handler: Optional event handler callback
         """
         section = f"filament_switch_sensor {name}"
-
-        # Check if sensor already exists
-        existing_sensor = self.printer.lookup_object(section, None)
-        if existing_sensor:
-            logging.info(f"AceController: ♻ Reusing existing sensor '{name}' (created by another plugin/config)")
-            # Store reference to existing sensor's endstop if available
-            if hasattr(existing_sensor, 'pin'):
-                self.endstops[name] = existing_sensor.pin
-            return
-
-        # Sensor doesn't exist, create new one
         logging.info(f"AceController: Creating sensor '{name}' on pin '{pin}'")
 
         # Create runout helper
@@ -175,6 +161,15 @@ class AceController:
                 self.get_status = helper.get_status
                 self.name = helper.name
                 self.pin = endstop_pin
+
+            # Expose the runout helper's commands for Mainsail compatibility
+            @property
+            def cmd_QUERY_FILAMENT_SENSOR(self):
+                return self.runout_helper.cmd_QUERY_FILAMENT_SENSOR
+
+            @property
+            def cmd_SET_FILAMENT_SENSOR(self):
+                return self.runout_helper.cmd_SET_FILAMENT_SENSOR
 
         # Set up endstop pin
         ppins = self.printer.lookup_object('pins')
@@ -208,6 +203,8 @@ class AceController:
                 logging.error(f"AceController: Failed to register sensor '{name}': {e}")
 
         self.printer.register_event_handler("klippy:ready", register_endstop)
+
+        return fs
 
     def _extruder_sensor_handler(self, eventtime, is_filament_present, runout_helper):
         """
