@@ -167,6 +167,12 @@ class AceController:
         fs.runout_helper = ro_helper
         fs.get_status = ro_helper.get_status
 
+        # Add dummy QUERY_PROBE handler to prevent Mainsail errors
+        # (Mainsail queries all objects, including non-probe sensors)
+        def dummy_query_probe(gcmd):
+            gcmd.respond_info(f"Sensor {name} is a filament sensor, not a probe")
+        fs.cmd_QUERY_PROBE = dummy_query_probe
+
         # Set up endstop pin for multi-use (shared with sensor)
         ppins = self.printer.lookup_object('pins')
         try:
