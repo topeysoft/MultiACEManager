@@ -119,12 +119,18 @@ class MmuRunoutHelper:
         if self.button_handler and not self.button_handler_suspended:
             self.button_handler(eventtime, is_filament_present, self)
 
-        if is_filament_present == self.filament_present: return
+        if is_filament_present == self.filament_present:
+            return
+
+        # Log state change for debugging
+        logging.info(f"ACE: Sensor {self.name} state changed: {'present' if is_filament_present else 'not present'}")
         self.filament_present = is_filament_present
 
         # Don't handle too early or if disabled
         if eventtime >= self.min_event_systime and self.sensor_enabled:
             self._process_state_change(eventtime, is_filament_present)
+        else:
+            logging.debug(f"ACE: Sensor {self.name} event ignored - eventtime: {eventtime}, min_event: {self.min_event_systime}, enabled: {self.sensor_enabled}")
 
     def _process_state_change(self, eventtime, is_filament_present):
         # Determine "printing" status
@@ -631,6 +637,8 @@ class BunnyAce:
         self._request_id = 0
         self._connection_retry_count = 0
         self.endstops = {}
+        self.polling_timers = {}  # Track sensor polling timers for cleanup
+        self.endstops_registered = set()  # Track which endstops are already registered
 
         # Default data to prevent exceptions
         # num_gates will be dynamically detected from ACE firmware response
@@ -666,7 +674,7 @@ class BunnyAce:
 
         self.printer.register_event_handler('klippy:ready', self._handle_ready)
         self.printer.register_event_handler('klippy:disconnect', self._handle_disconnect)
-        # self.printer.register_event_handler('klippy:shutdown', self._handle_disconnect)
+        self.printer.register_event_handler('klippy:shutdown', self._handle_shutdown)
 
         # Only register global commands if this is a standalone ACE (not managed)
         # Managed ACEs will have their commands registered by AceManager
@@ -676,6 +684,9 @@ class BunnyAce:
             self.gcode.register_command(
                 'ACE_DEBUG', self.cmd_ACE_DEBUG,
                 desc='self.cmd_ACE_DEBUG_help')
+            self.gcode.register_command(
+                'ACE_TEST_SENSORS', self.cmd_ACE_TEST_SENSORS,
+                desc=self.cmd_ACE_TEST_SENSORS_help)
             self.gcode.register_command(
                 'ACE_START_DRYING', self.cmd_ACE_START_DRYING,
                 desc=self.cmd_ACE_START_DRYING_help)
@@ -725,8 +736,28 @@ class BunnyAce:
         self.reactor.unregister_timer(self.writer_timer)
         self.reactor.unregister_timer(self.reader_timer)
 
+        # Cleanup sensor polling timers
+        self._cleanup_sensor_timers()
+
         self._queue = None
         self._main_queue = None
+
+    def _handle_shutdown(self):
+        """Handle Klipper shutdown - cleanup all resources"""
+        logging.info(f'ACE: Shutting down {self.serial_id}')
+
+        # Cleanup sensor polling timers first
+        self._cleanup_sensor_timers()
+
+        # Then close serial connection
+        try:
+            if self._serial is not None and self._serial.is_open:
+                self._serial.close()
+                logging.info(f"ACE: Closed connection to {self.serial_id} on shutdown")
+        except Exception as e:
+            logging.error(f"ACE: Error closing serial port during shutdown: {e}")
+
+        self._connected = False
 
     def _color_message(self, msg):
         try:
@@ -808,6 +839,20 @@ class BunnyAce:
 
         return callback
 
+    def _cleanup_sensor_timers(self) -> None:
+        """Cleanup all sensor polling timers"""
+        if not hasattr(self, 'polling_timers'):
+            return
+
+        for sensor_name, timer_handle in list(self.polling_timers.items()):
+            try:
+                self.reactor.unregister_timer(timer_handle)
+                logging.info(f"ACE: Unregistered polling timer for sensor '{sensor_name}'")
+            except Exception as e:
+                logging.error(f"ACE: Error unregistering polling timer for '{sensor_name}': {e}")
+
+        self.polling_timers.clear()
+
     def _serial_disconnect(self) -> None:
         """Safely disconnect from serial port and cleanup timers"""
         try:
@@ -826,6 +871,9 @@ class BunnyAce:
                 self.reactor.unregister_timer(self.writer_timer)
         except Exception as e:
             logging.error(f"ACE: Error unregistering timers: {e}")
+
+        # Cleanup sensor polling timers
+        self._cleanup_sensor_timers()
 
         # Reset state
         with self._lock:
@@ -1201,6 +1249,8 @@ class BunnyAce:
         # we'll create our own minimal implementation using just the endstop
         section = "filament_switch_sensor %s" % name
 
+        logging.info(f"ACE: Creating sensor '{name}' on pin '{pin}'")
+
         # Create our custom runout helper that handles all the logic
         ro_helper = MmuRunoutHelper(self.printer, name, 0.1, '', '', '',
                                     False, handler, pin)
@@ -1215,10 +1265,16 @@ class BunnyAce:
 
         # Set up the endstop pin for monitoring
         ppins = self.printer.lookup_object('pins')
-        pin_params = ppins.parse_pin(pin, True, True)
-        share_name = "%s:%s" % (pin_params['chip_name'], pin_params['pin'])
-        ppins.allow_multi_use_pin(share_name)
-        mcu_endstop = ppins.setup_pin('endstop', pin)
+        try:
+            pin_params = ppins.parse_pin(pin, True, True)
+            share_name = "%s:%s" % (pin_params['chip_name'], pin_params['pin'])
+            logging.info(f"ACE: Parsed pin '{pin}' as {share_name}")
+            ppins.allow_multi_use_pin(share_name)
+            mcu_endstop = ppins.setup_pin('endstop', pin)
+            logging.info(f"ACE: Successfully set up endstop for sensor '{name}'")
+        except Exception as e:
+            logging.error(f"ACE: Failed to setup pin '{pin}' for sensor '{name}': {e}")
+            raise
 
         # Create the minimal sensor object
         fs = MinimalSensor(ro_helper, mcu_endstop)
@@ -1231,29 +1287,66 @@ class BunnyAce:
 
         # Register the endstop when klippy is ready (query_endstops may not exist yet)
         def register_endstop():
+            # Prevent duplicate registration on reconnect
+            if name in self.endstops_registered:
+                logging.debug(f"ACE: Sensor '{name}' already registered, skipping duplicate registration")
+                # Still setup polling in case timers were cleaned up
+                try:
+                    self._setup_sensor_polling(mcu_endstop, ro_helper)
+                    logging.debug(f"ACE: Re-initialized polling for sensor '{name}'")
+                except Exception as e:
+                    logging.error(f"ACE: Failed to re-initialize polling for sensor '{name}': {e}")
+                return
+
             try:
                 query_endstops = self.printer.lookup_object('query_endstops')
-                query_endstops.register_endstop(mcu_endstop, share_name)
-            except:
-                logging.info(f"ACE: query_endstops not available for {name}")
+                if query_endstops:
+                    query_endstops.register_endstop(mcu_endstop, share_name)
+                    self.endstops_registered.add(name)
+                    logging.info(f"ACE: ✓ Registered sensor '{name}' ({share_name}) with query_endstops")
+                else:
+                    logging.error(f"ACE: query_endstops object is None for sensor '{name}'")
+            except Exception as e:
+                logging.error(f"ACE: Failed to register sensor '{name}' with query_endstops: {e}")
+                import traceback
+                logging.error(traceback.format_exc())
 
             # Set up polling for this sensor
-            self._setup_sensor_polling(mcu_endstop, ro_helper)
+            try:
+                self._setup_sensor_polling(mcu_endstop, ro_helper)
+                logging.info(f"ACE: ✓ Started polling for sensor '{name}'")
+            except Exception as e:
+                logging.error(f"ACE: Failed to start polling for sensor '{name}': {e}")
+                import traceback
+                logging.error(traceback.format_exc())
 
         self.printer.register_event_handler("klippy:ready", register_endstop)
 
     def _setup_sensor_polling(self, endstop, helper):
         # Set up periodic polling of the sensor state
+        sensor_name = helper.name
+
+        # Unregister existing timer if present (prevents duplicates on reconnect)
+        if sensor_name in self.polling_timers:
+            try:
+                self.reactor.unregister_timer(self.polling_timers[sensor_name])
+                logging.info(f"ACE: Unregistered old polling timer for '{sensor_name}'")
+            except Exception as e:
+                logging.error(f"ACE: Error unregistering old timer for '{sensor_name}': {e}")
+
         def poll_sensor(eventtime):
             # Query the endstop state
             try:
                 state = endstop.query_endstop(eventtime)
                 helper.note_filament_present(eventtime, state)
-            except:
-                pass
+            except Exception as e:
+                logging.error(f"ACE: Error polling sensor {helper.name}: {e}")
             return eventtime + 0.1  # Poll every 100ms
 
-        self.reactor.register_timer(poll_sensor, self.reactor.NOW)
+        # Register and store timer handle for later cleanup
+        timer_handle = self.reactor.register_timer(poll_sensor, self.reactor.NOW)
+        self.polling_timers[sensor_name] = timer_handle
+        logging.debug(f"ACE: Registered polling timer for '{sensor_name}'")
 
 
 
@@ -1606,6 +1699,35 @@ class BunnyAce:
         except Exception as e:
             self.gcode.respond_info('Error: ' + str(e))
 
+    cmd_ACE_TEST_SENSORS_help = 'Test sensor endstop readings'
+
+    def cmd_ACE_TEST_SENSORS(self, gcmd):
+        """Debug command to directly test sensor endstop states"""
+        self.gcode.respond_info('=== ACE Sensor Test ===')
+
+        eventtime = self.reactor.monotonic()
+
+        for sensor_name, endstop in self.endstops.items():
+            try:
+                # Try to query the endstop directly
+                state = endstop.query_endstop(eventtime)
+                state_str = 'TRIGGERED' if state else 'open'
+                self.gcode.respond_info(f'{sensor_name}: {state_str}')
+
+                # Also check the runout helper state
+                section = f"filament_switch_sensor {sensor_name}"
+                if section in self.printer.objects:
+                    sensor_obj = self.printer.objects[section]
+                    if hasattr(sensor_obj, 'runout_helper'):
+                        helper = sensor_obj.runout_helper
+                        helper_state = 'detected' if helper.filament_present else 'not detected'
+                        enabled = 'enabled' if helper.sensor_enabled else 'disabled'
+                        self.gcode.respond_info(f'  Helper state: {helper_state}, {enabled}')
+            except Exception as e:
+                self.gcode.respond_info(f'{sensor_name}: ERROR - {e}')
+                import traceback
+                logging.error(f'ACE: Error testing sensor {sensor_name}: {traceback.format_exc()}')
+
     cmd_ACE_GET_STATUS_help = 'Get detailed ACE status including slot information'
 
     def cmd_ACE_GET_STATUS(self, gcmd):
@@ -1706,6 +1828,7 @@ class BunnyAce:
             'spool_id': default_spool_ids,
             'selected_gate': int(self.save_variables.allVariables.get('ace_current_index', -1)),
             'endless_spool': bool(self.save_variables.allVariables.get('ace_endless_spool', False)),
+            'feed_assist_index': self._feed_assist_index,
             'num_gates': self.num_gates,
         }
 
@@ -2460,6 +2583,15 @@ class AceManager:
                 'health': self._get_device_health(ace)
             })
 
+        # Find global feed assist index by checking all ACE devices
+        global_feed_assist_index = -1
+        for device in self.ace_devices:
+            ace = device['instance']
+            if hasattr(ace, '_feed_assist_index') and ace._feed_assist_index != -1:
+                # Convert local gate index to global gate number
+                global_feed_assist_index = device['gate_offset'] + ace._feed_assist_index
+                break
+
         # Build per-device gate data with device-specific variables
         # This allows UI to know which gates belong to which device
         devices_detail = []
@@ -2508,6 +2640,7 @@ class AceManager:
             'spool_id': all_spool_ids,
             'selected_gate': selected_gate,
             'endless_spool': endless_spool,
+            'feed_assist_index': global_feed_assist_index,
             'num_gates': self.total_gates,
             'num_devices': len(self.ace_devices),
             'devices': devices_summary,
