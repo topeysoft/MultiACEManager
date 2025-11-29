@@ -194,6 +194,7 @@ class AceDevice:
 
         except serial.serialutil.SerialException as e:
             self._serial = None
+            self._connected = False
             self._connection_retry_count += 1
 
             if self._connection_retry_count >= self.connect_retry_max:
@@ -240,6 +241,7 @@ class AceDevice:
         except Exception as e:
             logging.error(f"AceDevice: Error closing serial port: {e}")
         finally:
+            self._serial = None
             self._connected = False
 
         try:
@@ -340,6 +342,11 @@ class AceDevice:
 
     def _writer(self, eventtime):
         """Send requests to ACE device and poll status"""
+        # Check connection state first
+        if not self._connected or self._serial is None or not self._serial.is_open:
+            logging.debug(f"AceDevice: Writer skipping - device not connected")
+            return eventtime + WRITER_POLL_INTERVAL
+
         try:
             def status_callback(response):
                 """Update internal state from status response"""
@@ -409,6 +416,13 @@ class AceDevice:
 
     def _send_request(self, request: Dict[str, Any]) -> None:
         """Send a JSON-RPC request to ACE device with retry logic"""
+        # Validate serial port before attempting write
+        if not self._connected:
+            raise OSError("Device not connected")
+
+        if self._serial is None or not self._serial.is_open:
+            raise OSError("Serial port not available")
+
         if 'id' not in request:
             request['id'] = self._get_next_request_id()
 
