@@ -66,8 +66,28 @@ class AceController:
         self.poop_macros = config.get('poop_macros', '_POOP')
         self.cut_macros = config.get('cut_macros', '_CUT_TIP')
 
+        # Connection and device configuration
+        self.baud = config.getint('baud', 115200)
+        self.connect_retry_delay = config.getfloat('connect_retry_delay', 1.0)
+        self.connect_retry_max = config.getint('connect_retry_max', 10)
+        self.max_dryer_temperature = config.getint('max_dryer_temperature', 55)
+
+        # Logging configuration
+        log_level_str = config.get('log_level', 'INFO').upper()
+        log_level = getattr(logging, log_level_str, logging.INFO)
+        logging.getLogger().setLevel(log_level)
+
+        # Auto-registration of T macros
+        self.auto_register_t_macros = config.getboolean('auto_register_t_macros', False)
+
         # Create device manager (handles 0-4 ACE devices)
-        self.device_manager = AceDeviceManager(self.printer, config)
+        # Pass connection parameters to device manager
+        self.device_manager = AceDeviceManager(
+            self.printer,
+            config,
+            connect_retry_delay=self.connect_retry_delay,
+            connect_retry_max=self.connect_retry_max
+        )
 
         # Sensors (shared across all devices)
         self.extruder_sensor = None

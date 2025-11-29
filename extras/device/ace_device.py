@@ -44,7 +44,8 @@ class AceDevice:
     - G-code command registration (belongs in AceController)
     """
 
-    def __init__(self, port: str, baud: int, device_id: str, reactor, log_level=logging.INFO):
+    def __init__(self, port: str, baud: int, device_id: str, reactor, log_level=logging.INFO,
+                 connect_retry_delay=self.connect_retry_delay, connect_retry_max=self.connect_retry_max):
         """
         Initialize ACE device driver.
 
@@ -54,12 +55,16 @@ class AceDevice:
             device_id: Unique device identifier (from AceDeviceDiscovery)
             reactor: Klipper reactor for timer management
             log_level: Logging level (ERROR, INFO, DEBUG)
+            connect_retry_delay: Delay between connection retries (default from constants)
+            connect_retry_max: Maximum connection retry attempts (default from constants)
         """
         self.serial_id = port
         self.baud = baud
         self.device_id = device_id
         self.reactor = reactor
         self.log_level = log_level
+        self.connect_retry_delay = connect_retry_delay
+        self.connect_retry_max = connect_retry_max
 
         # Hardware state
         self._serial = None
@@ -178,15 +183,15 @@ class AceDevice:
             self._serial = None
             self._connection_retry_count += 1
 
-            if self._connection_retry_count >= CONNECT_RETRY_MAX:
-                logging.error(f'AceDevice: Failed to connect to {self.serial_id} after {CONNECT_RETRY_MAX} attempts')
+            if self._connection_retry_count >= self.connect_retry_max:
+                logging.error(f'AceDevice: Failed to connect to {self.serial_id} after {self.connect_retry_max} attempts')
                 return self.reactor.NEVER
 
             # Calculate retry delay with exponential backoff
-            retry_delay = CONNECT_RETRY_DELAY * self._connection_retry_backoff
+            retry_delay = self.connect_retry_delay * self._connection_retry_backoff
             self._connection_retry_backoff *= CONNECT_RETRY_BACKOFF
 
-            logging.warning(f'AceDevice: Serial connection error to {self.serial_id} (attempt {self._connection_retry_count}/{CONNECT_RETRY_MAX}): {e}')
+            logging.warning(f'AceDevice: Serial connection error to {self.serial_id} (attempt {self._connection_retry_count}/{self.connect_retry_max}): {e}')
             logging.info(f'AceDevice: Retrying connection in {retry_delay:.1f}s...')
             return eventtime + retry_delay
 
@@ -195,10 +200,10 @@ class AceDevice:
             self._connection_retry_count += 1
             logging.error(f'AceDevice: Unexpected connection error: {e}')
 
-            if self._connection_retry_count >= CONNECT_RETRY_MAX:
+            if self._connection_retry_count >= self.connect_retry_max:
                 return self.reactor.NEVER
 
-            return eventtime + CONNECT_RETRY_DELAY
+            return eventtime + self.connect_retry_delay
 
     def _info_callback(self, response):
         """Handle device info response after connection"""

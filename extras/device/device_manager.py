@@ -30,13 +30,15 @@ class AceDeviceManager:
     - G-code commands (belongs in AceController)
     """
 
-    def __init__(self, printer, config):
+    def __init__(self, printer, config, connect_retry_delay=1.0, connect_retry_max=10):
         """
         Initialize device manager.
 
         Args:
             printer: Klipper printer object
             config: Configuration object from Klipper
+            connect_retry_delay: Retry delay for device connections
+            connect_retry_max: Maximum connection retry attempts
         """
         self.printer = printer
         self.reactor = printer.get_reactor()
@@ -49,6 +51,8 @@ class AceDeviceManager:
 
         # Configuration parameters
         self.baud = config.getint('baud', 115200)
+        self.connect_retry_delay = connect_retry_delay
+        self.connect_retry_max = connect_retry_max
         self.log_level = logging.INFO
         log_level_str = config.get('log_level', 'INFO').upper()
         if hasattr(logging, log_level_str):
@@ -118,7 +122,9 @@ class AceDeviceManager:
                 baud=self.baud,
                 device_id=device_id,
                 reactor=self.reactor,
-                log_level=self.log_level
+                log_level=self.log_level,
+                connect_retry_delay=self.connect_retry_delay,
+                connect_retry_max=self.connect_retry_max
             )
 
             # Store device info
@@ -169,7 +175,9 @@ class AceDeviceManager:
                 baud=self.baud,
                 device_id=device_id,
                 reactor=self.reactor,
-                log_level=self.log_level
+                log_level=self.log_level,
+                connect_retry_delay=self.connect_retry_delay,
+                connect_retry_max=self.connect_retry_max
             )
 
             # Store device info
