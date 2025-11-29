@@ -45,7 +45,7 @@ class AceDevice:
     """
 
     def __init__(self, port: str, baud: int, device_id: str, reactor, log_level=logging.INFO,
-                 connect_retry_delay=self.connect_retry_delay, connect_retry_max=self.connect_retry_max):
+                 connect_retry_delay=CONNECT_RETRY_DELAY, connect_retry_max=CONNECT_RETRY_MAX):
         """
         Initialize ACE device driver.
 
