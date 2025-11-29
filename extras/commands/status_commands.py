@@ -215,6 +215,40 @@ class StatusCommands:
         # Reconnect all devices
         self.device_manager.connect_all()
 
+        # Wait for all devices to connect (with timeout)
+        self.gcode.respond_info('Waiting for devices to connect...')
+        timeout = 15.0  # 15 second timeout
+        start_time = self.controller.reactor.monotonic()
+        poll_interval = 0.5  # Check every 500ms
+
+        while True:
+            # Check if all devices are connected
+            all_connected = all(
+                dev['instance']._connected
+                for dev in self.device_manager.ace_devices
+            )
+
+            if all_connected:
+                self.gcode.respond_info(f'All {len(verified_devices)} devices connected successfully!')
+                break
+
+            # Check timeout
+            elapsed = self.controller.reactor.monotonic() - start_time
+            if elapsed > timeout:
+                # Count how many are actually connected
+                connected_count = sum(
+                    1 for dev in self.device_manager.ace_devices
+                    if dev['instance']._connected
+                )
+                self.gcode.respond_info(
+                    f'Timeout: {connected_count}/{len(verified_devices)} devices connected after {timeout}s'
+                )
+                break
+
+            # Wait before next check
+            currTs = self.controller.reactor.monotonic()
+            self.controller.reactor.pause(currTs + poll_interval)
+
         logging.info(f"StatusCommands: Applied {len(verified_devices)} devices with {self.device_manager.total_gates} total gates")
 
     def _show_gate_configuration(self, total_gates):
