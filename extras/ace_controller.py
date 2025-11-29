@@ -161,6 +161,8 @@ class AceController:
                 self.get_status = helper.get_status
                 self.name = helper.name
                 self.pin = endstop_pin
+                # Explicitly mark this as NOT a probe to prevent QUERY_PROBE attempts
+                self.multi_probe_pending = False
 
             # Expose the runout helper's commands for Mainsail compatibility
             @property
