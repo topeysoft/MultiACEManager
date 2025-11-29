@@ -74,9 +74,80 @@ check_folders()
 
 link_extension()
 {
-    echo -n "Linking extension to Klipper... "
-    ln -sf "${SRCDIR}/extras/ace.py" "${KLIPPER_HOME}/klippy/extras/ace.py"
+    echo "Linking ACE modular architecture to Klipper..."
+
+    # Create ace package directory structure
+    echo -n "  - Creating ace package directory... "
+    mkdir -p "${KLIPPER_HOME}/klippy/extras/ace"
     echo "[OK]"
+
+    # Link modular architecture files
+    echo -n "  - Linking ace/__init__.py (entry point)... "
+    ln -sf "${SRCDIR}/extras/__init__.py" "${KLIPPER_HOME}/klippy/extras/ace/__init__.py"
+    echo "[OK]"
+
+    echo -n "  - Linking ace/exceptions.py... "
+    ln -sf "${SRCDIR}/extras/exceptions.py" "${KLIPPER_HOME}/klippy/extras/ace/exceptions.py"
+    echo "[OK]"
+
+    echo -n "  - Linking ace/ace_controller.py... "
+    ln -sf "${SRCDIR}/extras/ace_controller.py" "${KLIPPER_HOME}/klippy/extras/ace/ace_controller.py"
+    echo "[OK]"
+
+    # Link protocol package
+    echo -n "  - Creating ace/protocol directory... "
+    mkdir -p "${KLIPPER_HOME}/klippy/extras/ace/protocol"
+    echo "[OK]"
+
+    ln -sf "${SRCDIR}/extras/protocol/__init__.py" "${KLIPPER_HOME}/klippy/extras/ace/protocol/__init__.py"
+    ln -sf "${SRCDIR}/extras/protocol/constants.py" "${KLIPPER_HOME}/klippy/extras/ace/protocol/constants.py"
+    ln -sf "${SRCDIR}/extras/protocol/packet.py" "${KLIPPER_HOME}/klippy/extras/ace/protocol/packet.py"
+    echo -n "  - Linked protocol/*.py (3 files)... "
+    echo "[OK]"
+
+    # Link device package
+    echo -n "  - Creating ace/device directory... "
+    mkdir -p "${KLIPPER_HOME}/klippy/extras/ace/device"
+    echo "[OK]"
+
+    ln -sf "${SRCDIR}/extras/device/__init__.py" "${KLIPPER_HOME}/klippy/extras/ace/device/__init__.py"
+    ln -sf "${SRCDIR}/extras/device/ace_device.py" "${KLIPPER_HOME}/klippy/extras/ace/device/ace_device.py"
+    ln -sf "${SRCDIR}/extras/device/device_manager.py" "${KLIPPER_HOME}/klippy/extras/ace/device/device_manager.py"
+    ln -sf "${SRCDIR}/extras/device/device_discovery.py" "${KLIPPER_HOME}/klippy/extras/ace/device/device_discovery.py"
+    ln -sf "${SRCDIR}/extras/device/device_mapper.py" "${KLIPPER_HOME}/klippy/extras/ace/device/device_mapper.py"
+    echo -n "  - Linked device/*.py (5 files)... "
+    echo "[OK]"
+
+    # Link sensors package
+    echo -n "  - Creating ace/sensors directory... "
+    mkdir -p "${KLIPPER_HOME}/klippy/extras/ace/sensors"
+    echo "[OK]"
+
+    ln -sf "${SRCDIR}/extras/sensors/__init__.py" "${KLIPPER_HOME}/klippy/extras/ace/sensors/__init__.py"
+    ln -sf "${SRCDIR}/extras/sensors/runout_helper.py" "${KLIPPER_HOME}/klippy/extras/ace/sensors/runout_helper.py"
+    echo -n "  - Linked sensors/*.py (2 files)... "
+    echo "[OK]"
+
+    # Link commands package
+    echo -n "  - Creating ace/commands directory... "
+    mkdir -p "${KLIPPER_HOME}/klippy/extras/ace/commands"
+    echo "[OK]"
+
+    ln -sf "${SRCDIR}/extras/commands/__init__.py" "${KLIPPER_HOME}/klippy/extras/ace/commands/__init__.py"
+    ln -sf "${SRCDIR}/extras/commands/tool_commands.py" "${KLIPPER_HOME}/klippy/extras/ace/commands/tool_commands.py"
+    ln -sf "${SRCDIR}/extras/commands/config_commands.py" "${KLIPPER_HOME}/klippy/extras/ace/commands/config_commands.py"
+    ln -sf "${SRCDIR}/extras/commands/status_commands.py" "${KLIPPER_HOME}/klippy/extras/ace/commands/status_commands.py"
+    echo -n "  - Linked commands/*.py (4 files)... "
+    echo "[OK]"
+
+    echo ""
+    echo "================================================"
+    echo "ACE Modular Architecture Installed!"
+    echo "================================================"
+    echo "  Total: 18 modular files"
+    echo "  Entry: ace/__init__.py:load_config()"
+    echo "  Architecture: AceController → AceDeviceManager → AceDevice"
+    echo ""
 }
 
 copy_config()
@@ -169,13 +240,20 @@ uninstall()
     echo "Uninstalling BunnyACE..."
     echo ""
 
-    # Uninstall Klipper extension
-    if [ -f "${KLIPPER_HOME}/klippy/extras/ace.py" ]; then
-        echo -n "  - Removing Klipper extension... "
-        rm -f "${KLIPPER_HOME}/klippy/extras/ace.py"
+    # Uninstall ACE package (contains both legacy and modular)
+    if [ -d "${KLIPPER_HOME}/klippy/extras/ace" ]; then
+        echo -n "  - Removing ace/ package (legacy + modular)... "
+        rm -rf "${KLIPPER_HOME}/klippy/extras/ace"
         echo "[OK]"
     else
-        echo "  - ace.py not found in Klipper extras [SKIPPED]"
+        echo "  - ace/ package not found [SKIPPED]"
+    fi
+
+    # Remove old standalone ace.py if it exists (from previous installations)
+    if [ -f "${KLIPPER_HOME}/klippy/extras/ace.py" ]; then
+        echo -n "  - Removing old ace.py (if exists from previous install)... "
+        rm -f "${KLIPPER_HOME}/klippy/extras/ace.py"
+        echo "[OK]"
     fi
 
     # Uninstall Moonraker component
@@ -328,9 +406,9 @@ if [ "$UNINSTALL" -ne 1 ]; then
         echo ""
     fi
     echo "Documentation:"
+    echo "  - extras/ARCHITECTURE.md     - Modular architecture details"
     echo "  - USB_PORT_MAPPING_GUIDE.md  - USB port-based device mapping"
     echo "  - DRYER_CONTROL_GUIDE.md     - Per-device dryer control"
-    echo "  - MIGRATION_GUIDE.md         - Fixing corrupted ace_vars.cfg"
     echo ""
 else
     uninstall
