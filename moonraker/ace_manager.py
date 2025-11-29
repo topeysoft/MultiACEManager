@@ -106,7 +106,7 @@ class AceManager:
 
             return {
                 'devices': devices,
-                'total_gates': ace_data.get('num_gates', 0),
+                'total_gates': ace_data.get('total_gates', 0),
                 'num_devices': ace_data.get('num_devices', 0),
                 'auto_detect_enabled': True
             }

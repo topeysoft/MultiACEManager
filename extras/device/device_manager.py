@@ -247,6 +247,15 @@ class AceDeviceManager:
                 'gate_offset': dev['gate_offset'],
                 'gates': list(range(dev['gate_offset'], dev['gate_offset'] + GATES_PER_ACE)),
                 'connected': dev['instance']._connected,
+                'connection_status': 'connected' if dev['instance']._connected else 'disconnected',
+                'model': dev['instance']._info.get('model', 'ACE Pro'),
+                'firmware': dev['instance']._info.get('firmware', 'Unknown'),
+                'health': {
+                    'avg_response_time_ms': 0,  # TODO: Track actual response times
+                    'error_count': dev['instance']._consecutive_write_errors,
+                    'uptime': 0,  # TODO: Calculate from connection time
+                    'temperature': dev['instance']._info.get('temp', 0),
+                },
                 'status': dev['instance'].get_status()
             }
             for dev in self.ace_devices
