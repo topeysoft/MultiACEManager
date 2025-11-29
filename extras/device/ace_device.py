@@ -84,6 +84,11 @@ class AceDevice:
         self._connection_retry_count = 0
         self._connection_retry_backoff = 1.0
 
+        # I/O error tracking
+        self._consecutive_write_errors = 0
+        self._io_error_cooldown = False
+        self._max_consecutive_errors = 3
+
         # Device info
         self.num_gates = GATES_PER_ACE
         self._info = {
@@ -140,6 +145,13 @@ class AceDevice:
 
     def _connect(self, eventtime):
         """Attempt to connect to ACE device via serial port"""
+        # If we're in I/O error cooldown, wait before attempting connection
+        if self._io_error_cooldown:
+            cooldown_delay = 5.0  # 5 second cooldown for I/O errors
+            logging.info(f'AceDevice: I/O error cooldown active, waiting {cooldown_delay}s before reconnecting to {self.serial_id}')
+            self._io_error_cooldown = False
+            return eventtime + cooldown_delay
+
         logging.info(f'AceDevice: Attempting connection to {self.serial_id}')
 
         try:
@@ -157,6 +169,7 @@ class AceDevice:
                 self._request_id = 0
                 self._connection_retry_count = 0
                 self._connection_retry_backoff = 1.0
+                self._consecutive_write_errors = 0
                 with self._lock:
                     self._request_in_flight = False
                     self._pending_request_id = None
@@ -376,20 +389,48 @@ class AceDevice:
             with self._lock:
                 self._request_in_flight = False
                 self._pending_request_id = None
-            self._serial_disconnect()
-            self.connect_timer = self.reactor.register_timer(self._connect, self.reactor.NOW)
-            return self.reactor.NEVER
+
+            # Track consecutive errors for I/O issues
+            self._consecutive_write_errors += 1
+
+            # Only disconnect after multiple consecutive errors
+            if self._consecutive_write_errors >= self._max_consecutive_errors:
+                logging.error(f'AceDevice: {self._consecutive_write_errors} consecutive write errors, disconnecting...')
+                self._io_error_cooldown = True
+                self._serial_disconnect()
+                self.connect_timer = self.reactor.register_timer(self._connect, self.reactor.NOW)
+                return self.reactor.NEVER
+            else:
+                logging.warning(f'AceDevice: Write error {self._consecutive_write_errors}/{self._max_consecutive_errors}, continuing...')
+                # Continue trying on next iteration
+                return eventtime + WRITER_POLL_INTERVAL
 
         return eventtime + WRITER_POLL_INTERVAL
 
     def _send_request(self, request: Dict[str, Any]) -> None:
-        """Send a JSON-RPC request to ACE device"""
+        """Send a JSON-RPC request to ACE device with retry logic"""
         if 'id' not in request:
             request['id'] = self._get_next_request_id()
 
         # Use AcePacket encoder
         packet_data = AcePacket.encode(request)
-        self._serial.write(packet_data)
+
+        # Retry write operation on I/O errors
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                self._serial.write(packet_data)
+                # Reset consecutive error counter on successful write
+                self._consecutive_write_errors = 0
+                return
+            except OSError as e:
+                if attempt < max_retries - 1:
+                    logging.warning(f"AceDevice: Write attempt {attempt + 1} failed: {e}, retrying...")
+                    time.sleep(0.1)  # 100ms delay between retries
+                else:
+                    # All retries exhausted, re-raise
+                    logging.error(f"AceDevice: Write failed after {max_retries} attempts: {e}")
+                    raise
 
     def send_request(self, request: dict, callback: Callable):
         """

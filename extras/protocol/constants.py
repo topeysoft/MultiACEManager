@@ -10,7 +10,7 @@ CRC_INIT_VALUE = 0xFFFF
 
 # Timing Constants
 DEFAULT_EVENT_DELAY = 0.1
-READY_WAIT_DELAY = 2.0
+READY_WAIT_DELAY = 3.0  # Increased from 2.0s to allow device stabilization after connection
 CONNECT_RETRY_DELAY = 1.0
 CONNECT_RETRY_MAX = 10  # Maximum connection retry attempts
 CONNECT_RETRY_BACKOFF = 1.5  # Exponential backoff multiplier
