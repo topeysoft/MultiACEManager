@@ -27,7 +27,8 @@ class AceDeviceMapper:
             config_path: Path to configuration file for persisting device mappings
         """
         self.config_path = config_path
-        self.device_map = {}  # device_id -> {port, usb_location, properties, last_seen, last_gate_offset}
+        self.device_map = {}  # device_id -> {port, usb_location, alias, properties, last_seen, last_gate_offset}
+        self.alias_to_id = {}  # alias -> device_id (for fast lookup)
         self.load()
 
     def load(self):
@@ -47,13 +48,18 @@ class AceDeviceMapper:
                 device_id = AceDeviceDiscovery.sanitize_device_id(device_id_raw)
                 parts = [p.strip() for p in value.split(',')]
                 if len(parts) >= 2:
+                    alias = parts[4] if len(parts) > 4 else ''
                     self.device_map[device_id] = {
                         'port': parts[0],
                         'usb_location': parts[3] if len(parts) > 3 else '',
                         'last_seen': int(parts[2]) if len(parts) > 2 else 0,
                         'last_gate_offset': int(parts[1]) if len(parts) > 1 else 0,  # Informational only
+                        'alias': alias,
                         'properties': {}
                     }
+                    # Build alias lookup
+                    if alias:
+                        self.alias_to_id[alias] = device_id
 
         # Load device-specific properties from individual sections
         for section in parser.sections():
@@ -67,6 +73,7 @@ class AceDeviceMapper:
                         'usb_location': '',
                         'last_seen': 0,
                         'last_gate_offset': 0,
+                        'alias': '',
                         'properties': {}
                     }
 
@@ -91,7 +98,8 @@ class AceDeviceMapper:
         for device_id, info in sorted(self.device_map.items()):
             # Sanitize device_id for use as config option name
             safe_id = AceDeviceDiscovery.sanitize_device_id(device_id)
-            value = f"{info['port']}, {info['last_gate_offset']}, {int(time.time())}, {info.get('usb_location', '')}"
+            alias = info.get('alias', '')
+            value = f"{info['port']}, {info['last_gate_offset']}, {int(time.time())}, {info.get('usb_location', '')}, {alias}"
             parser.set('ace_device_map', safe_id, value)
 
         # Save device-specific properties in separate sections
@@ -125,6 +133,7 @@ class AceDeviceMapper:
                 'usb_location': usb_location or '',
                 'last_seen': int(time.time()),
                 'last_gate_offset': current_gate_offset if current_gate_offset is not None else 0,
+                'alias': '',
                 'properties': {}
             }
         else:
@@ -159,3 +168,68 @@ class AceDeviceMapper:
             if info['port'] == port:
                 return device_id
         return None
+
+    def resolve_device_id(self, identifier):
+        """
+        Resolve device identifier to device_id.
+        Accepts either device_id or alias.
+
+        Args:
+            identifier: Device ID (e.g., 'hub_1_port_2') or alias (e.g., 'ACE1', 'top_left')
+
+        Returns:
+            device_id if found, None otherwise
+        """
+        # First check if it's an alias
+        if identifier in self.alias_to_id:
+            return self.alias_to_id[identifier]
+
+        # Check if it's a device_id
+        if identifier in self.device_map:
+            return identifier
+
+        return None
+
+    def set_alias(self, device_id, alias):
+        """
+        Set or update alias for a device.
+
+        Args:
+            device_id: Device ID to set alias for
+            alias: New alias (empty string to remove alias)
+
+        Returns:
+            True if successful, False if device not found or alias already in use
+        """
+        if device_id not in self.device_map:
+            logging.warning(f"ACE Mapper: Cannot set alias for unknown device {device_id}")
+            return False
+
+        # Check if alias is already in use by another device
+        if alias and alias in self.alias_to_id and self.alias_to_id[alias] != device_id:
+            logging.warning(f"ACE Mapper: Alias '{alias}' already in use by device {self.alias_to_id[alias]}")
+            return False
+
+        # Remove old alias if exists
+        old_alias = self.device_map[device_id].get('alias', '')
+        if old_alias and old_alias in self.alias_to_id:
+            del self.alias_to_id[old_alias]
+
+        # Set new alias
+        self.device_map[device_id]['alias'] = alias
+        if alias:
+            self.alias_to_id[alias] = device_id
+            logging.info(f"ACE Mapper: Set alias '{alias}' for device {device_id}")
+        else:
+            logging.info(f"ACE Mapper: Removed alias from device {device_id}")
+
+        return True
+
+    def get_alias(self, device_id):
+        """Get alias for a device (returns empty string if no alias)"""
+        return self.device_map.get(device_id, {}).get('alias', '')
+
+    def get_display_name(self, device_id):
+        """Get display name for device (alias if set, otherwise device_id)"""
+        alias = self.get_alias(device_id)
+        return alias if alias else device_id

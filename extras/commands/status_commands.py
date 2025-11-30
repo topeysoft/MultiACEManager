@@ -357,12 +357,20 @@ class StatusCommands:
             conn = '✓ Connected' if dev['connected'] else '✗ Disconnected'
             gates_str = f"{dev['gate_offset']}-{dev['gate_offset']+3}"
 
-            self.gcode.respond_info(f'\nDevice {i+1}: {dev["name"]}')
+            # Get alias if available
+            device_id = dev.get('device_id')
+            display_name = dev["name"]
+            if device_id and hasattr(self.device_manager, 'device_mapper'):
+                alias = self.device_manager.device_mapper.get_alias(device_id)
+                if alias:
+                    display_name = f'{alias} ({dev["name"]})'
+
+            self.gcode.respond_info(f'\nDevice {i+1}: {display_name}')
             self.gcode.respond_info(f'  Status: {conn}')
             self.gcode.respond_info(f'  Port: {dev.get("port", "N/A")}')
             self.gcode.respond_info(f'  Gates: {gates_str}')
-            if dev.get('device_id'):
-                self.gcode.respond_info(f'  ID: {dev["device_id"]}')
+            if device_id:
+                self.gcode.respond_info(f'  ID: {device_id}')
 
     def cmd_ACE_SHOW_USB_INFO(self, gcmd):
         """
@@ -371,31 +379,84 @@ class StatusCommands:
         Show USB topology and device-to-port mapping.
         """
         try:
-            self.gcode.respond_info('=== USB Device Mapping ===\n')
+            self.gcode.respond_info('=' * 70)
+            self.gcode.respond_info('ACE USB Port Mapping & Device Topology')
+            self.gcode.respond_info('=' * 70)
 
             # Show currently configured devices
             status = self.device_manager.get_aggregated_status()
-            self.gcode.respond_info(f'Configured Devices: {status["num_devices"]}')
+            self.gcode.respond_info(f'\nCurrently Connected Devices:')
+            self.gcode.respond_info('-' * 70)
+
+            device_mapper = None
+            if hasattr(self.device_manager, 'device_mapper'):
+                device_mapper = self.device_manager.device_mapper
 
             for i, dev in enumerate(status['devices']):
-                self.gcode.respond_info(f'\n{dev["name"]}:')
-                self.gcode.respond_info(f'  Port: {dev.get("port", "N/A")}')
-                self.gcode.respond_info(f'  Gates: {dev["gate_offset"]}-{dev["gate_offset"]+3}')
-                self.gcode.respond_info(f'  USB Location: {dev.get("usb_location", "Unknown")}')
-                self.gcode.respond_info(f'  Connection: {"✓ Active" if dev["connected"] else "✗ Inactive"}')
+                conn_symbol = '✓' if dev['connected'] else '✗'
+                device_id = dev.get('device_id', 'Unknown')
 
-            # Scan for all ACE devices
-            self.gcode.respond_info('\n=== USB Scan Results ===')
-            self.gcode.respond_info('(Scanning USB ports...)')
+                # Get alias if available
+                alias = ''
+                if device_mapper and device_id != 'Unknown':
+                    alias = device_mapper.get_alias(device_id)
 
-            discovered = AceDeviceDiscovery.find_ace_devices()
+                # Build header line
+                device_num = f'Device {i+1}'
+                if alias:
+                    header = f'{conn_symbol} {device_num}: {alias}'
+                else:
+                    header = f'{conn_symbol} {device_num}: {dev["name"]}'
 
-            if discovered:
-                self.gcode.respond_info(f'Found {len(discovered)} ACE device(s) on USB:')
-                for dev in discovered:
-                    self.gcode.respond_info(f'  - {dev["port"]} ({dev["device_id"]})')
-            else:
-                self.gcode.respond_info('No ACE devices detected on USB')
+                self.gcode.respond_info(f'\n{header}')
+                self.gcode.respond_info(f'   ID:           {device_id}')
+                if alias:
+                    self.gcode.respond_info(f'   Alias:        {alias}')
+                self.gcode.respond_info(f'   USB Location: {dev.get("usb_location", "Unknown")}')
+                self.gcode.respond_info(f'   Serial Port:  {dev.get("port", "N/A")}')
+                self.gcode.respond_info(f'   Gate Range:   {dev["gate_offset"]}-{dev["gate_offset"]+3}')
+
+            # Show disconnected devices from mapper
+            if device_mapper:
+                all_devices = device_mapper.get_all_devices()
+                connected_ids = {dev.get('device_id') for dev in status['devices']}
+                disconnected = {did: info for did, info in all_devices.items() if did not in connected_ids}
+
+                if disconnected:
+                    self.gcode.respond_info('')
+                    self.gcode.respond_info('=' * 70)
+                    self.gcode.respond_info('Previously Seen Devices (Not Currently Connected):')
+                    self.gcode.respond_info('-' * 70)
+
+                    for device_id, info in disconnected.items():
+                        alias = info.get('alias', '')
+                        header = f'⊗ Device: {alias}' if alias else f'⊗ Device: {device_id}'
+
+                        self.gcode.respond_info(f'\n{header}')
+                        self.gcode.respond_info(f'   ID:              {device_id}')
+                        if alias:
+                            self.gcode.respond_info(f'   Alias:           {alias}')
+                        self.gcode.respond_info(f'   USB Location:    {info.get("usb_location", "Unknown")}')
+                        self.gcode.respond_info(f'   Last Port:       {info.get("port", "Unknown")}')
+                        self.gcode.respond_info(f'   Last Gate Range: {info.get("last_gate_offset", 0)}-{info.get("last_gate_offset", 0)+3}')
+
+            # Summary
+            self.gcode.respond_info('')
+            self.gcode.respond_info('=' * 70)
+            self.gcode.respond_info('Summary:')
+            self.gcode.respond_info('-' * 70)
+            self.gcode.respond_info(f'Total Connected Devices:  {status["num_devices"]}')
+            self.gcode.respond_info(f'Total Gates Available:    {status["total_gates"]}')
+            if device_mapper:
+                total_known = len(device_mapper.get_all_devices())
+                disconnected_count = len(disconnected) if 'disconnected' in locals() else 0
+                self.gcode.respond_info(f'Known Devices (Total):    {total_known}')
+                self.gcode.respond_info(f'Disconnected Devices:     {disconnected_count}')
+            self.gcode.respond_info('')
+            self.gcode.respond_info('=' * 70)
+            self.gcode.respond_info('Device properties (colors, materials, temps) persist with each device')
+            self.gcode.respond_info('Gate offsets are dynamically assigned based on connected device order')
+            self.gcode.respond_info('=' * 70)
 
         except Exception as e:
             logging.error(f'ACE_SHOW_USB_INFO error: {e}')

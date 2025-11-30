@@ -4,6 +4,8 @@ Configuration-related G-code commands for ACE Pro system.
 Commands:
 - ACE_GATE_MAP - Configure gate properties (color, material, temp)
 - ACE_ENDLESS_SPOOL - Enable/disable endless spool feature
+- ACE_ALIAS - Set friendly alias for a device
+- ACE_UNALIAS - Remove alias from a device
 """
 
 import logging
@@ -39,7 +41,15 @@ class ConfigCommands:
             'ACE_ENDLESS_SPOOL', self.cmd_ACE_ENDLESS_SPOOL,
             desc='Enable/disable endless spool')
 
-        logging.info("ConfigCommands: Registered ACE_GATE_MAP, ACE_ENDLESS_SPOOL")
+        self.gcode.register_command(
+            'ACE_ALIAS', self.cmd_ACE_ALIAS,
+            desc='Set device alias')
+
+        self.gcode.register_command(
+            'ACE_UNALIAS', self.cmd_ACE_UNALIAS,
+            desc='Remove device alias')
+
+        logging.info("ConfigCommands: Registered ACE_GATE_MAP, ACE_ENDLESS_SPOOL, ACE_ALIAS, ACE_UNALIAS")
 
     def cmd_ACE_GATE_MAP(self, gcmd):
         """
@@ -138,3 +148,84 @@ class ConfigCommands:
         status = 'enabled' if enable else 'disabled'
         logging.info(f'ConfigCommands: Endless spool {status}')
         self.gcode.respond_info(f'ACE: Endless spool {status}')
+
+    def cmd_ACE_ALIAS(self, gcmd):
+        """
+        ACE_ALIAS DEVICE=<device_id> NAME=<alias>
+
+        Set a friendly alias for a device.
+        The device can then be referenced by either its device_id or alias.
+
+        Examples:
+            ACE_ALIAS DEVICE=hub_1_port_2 NAME=ACE1
+            ACE_ALIAS DEVICE=hub_1_port_3 NAME=top_left
+            ACE_ALIAS DEVICE=hub_1_port_4 NAME=filament_tower
+
+        After setting an alias, you can use it in commands:
+            ACE_GET_STATUS DEVICE=ACE1
+            ACE_GATE_MAP DEVICE=top_left GATE=0 COLOR=FF0000
+        """
+        device = gcmd.get('DEVICE')
+        alias = gcmd.get('NAME')
+
+        if not device:
+            raise gcmd.error('DEVICE parameter required')
+        if not alias:
+            raise gcmd.error('NAME parameter required')
+
+        # Validate alias format (alphanumeric and underscore only)
+        if not alias.replace('_', '').isalnum():
+            raise gcmd.error('Alias must contain only letters, numbers, and underscores')
+
+        # Get device mapper
+        device_mapper = self.device_manager.device_mapper
+
+        # Resolve device (in case they're using an existing alias)
+        device_id = device_mapper.resolve_device_id(device)
+        if not device_id:
+            raise gcmd.error(f'Device "{device}" not found')
+
+        # Set alias
+        if device_mapper.set_alias(device_id, alias):
+            device_mapper.save()
+            logging.info(f'ConfigCommands: Set alias "{alias}" for device {device_id}')
+            self.gcode.respond_info(f'ACE: Device {device_id} aliased as "{alias}"')
+        else:
+            raise gcmd.error(f'Failed to set alias (may already be in use)')
+
+    def cmd_ACE_UNALIAS(self, gcmd):
+        """
+        ACE_UNALIAS DEVICE=<device_id_or_alias>
+
+        Remove the alias from a device.
+
+        Examples:
+            ACE_UNALIAS DEVICE=ACE1
+            ACE_UNALIAS DEVICE=hub_1_port_2
+        """
+        device = gcmd.get('DEVICE')
+
+        if not device:
+            raise gcmd.error('DEVICE parameter required')
+
+        # Get device mapper
+        device_mapper = self.device_manager.device_mapper
+
+        # Resolve device
+        device_id = device_mapper.resolve_device_id(device)
+        if not device_id:
+            raise gcmd.error(f'Device "{device}" not found')
+
+        # Get current alias
+        old_alias = device_mapper.get_alias(device_id)
+        if not old_alias:
+            self.gcode.respond_info(f'ACE: Device {device_id} has no alias')
+            return
+
+        # Remove alias
+        if device_mapper.set_alias(device_id, ''):
+            device_mapper.save()
+            logging.info(f'ConfigCommands: Removed alias "{old_alias}" from device {device_id}')
+            self.gcode.respond_info(f'ACE: Removed alias "{old_alias}" from device {device_id}')
+        else:
+            raise gcmd.error('Failed to remove alias')
