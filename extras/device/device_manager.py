@@ -100,14 +100,15 @@ class AceDeviceManager:
             if probe_result:
                 verified_devices.append({
                     'device_id': probe_result['device_id'],
-                    'port': port,
+                    'port': probe_result['port'],  # This is now by-path
+                    'port_tty': probe_result.get('port_tty'),  # ttyACM reference
                     'usb_location': usb_location or '',
                     'firmware': probe_result.get('firmware', 'unknown'),
-                    'model': probe_result.get('model', 'ACE'),
-                    'port_by_path': probe_result.get('port_by_path'),
-                    'port_by_id': probe_result.get('port_by_id')
+                    'model': probe_result.get('model', 'ACE')
                 })
-                logging.info(f"AceDeviceManager: Found device {probe_result['device_id']} at {port}")
+                logging.info(f"AceDeviceManager: Found device {probe_result['device_id']}")
+                logging.info(f"AceDeviceManager:   by-path: {probe_result['port']}")
+                logging.info(f"AceDeviceManager:   tty ref: {probe_result.get('port_tty', 'N/A')}")
 
         # Sort by USB location for deterministic ordering
         verified_devices.sort(key=lambda d: d.get('usb_location', ''))
@@ -115,24 +116,12 @@ class AceDeviceManager:
         # Create device instances
         for i, dev in enumerate(verified_devices):
             device_id = dev['device_id']
-            port = dev['port']
+            port = dev['port']  # This is by-path
             gate_offset = i * GATES_PER_ACE
 
-            # Use stable by-path if available, otherwise fallback to regular port
-            port_by_path = dev.get('port_by_path')
-            port_by_id = dev.get('port_by_id')
-            connection_port = port_by_path or port_by_id or port
-
-            if port_by_path:
-                logging.info(f"AceDeviceManager: Using by-path for {device_id}: {port_by_path}")
-            elif port_by_id:
-                logging.info(f"AceDeviceManager: Using by-id for {device_id}: {port_by_id}")
-            else:
-                logging.info(f"AceDeviceManager: Using regular port for {device_id}: {port}")
-
-            # Create AceDevice instance
+            # Create AceDevice instance (port is already by-path)
             ace_instance = AceDevice(
-                port=connection_port,
+                port=port,
                 baud=self.baud,
                 device_id=device_id,
                 reactor=self.reactor,
@@ -145,12 +134,11 @@ class AceDeviceManager:
             self.ace_devices.append({
                 'name': f"ACE_{i+1}",
                 'device_id': device_id,
-                'port': port,
+                'port': port,  # by-path
+                'port_tty': dev.get('port_tty', ''),  # ttyACM reference
                 'instance': ace_instance,
                 'gate_offset': gate_offset,
-                'usb_location': dev.get('usb_location', ''),
-                'port_by_path': dev.get('port_by_path'),
-                'port_by_id': dev.get('port_by_id')
+                'usb_location': dev.get('usb_location', '')
             })
 
             self.device_ids[port] = device_id
@@ -167,11 +155,10 @@ class AceDeviceManager:
             for i, dev_info in enumerate(self.ace_devices):
                 self.device_mapper.update_device(
                     dev_info['device_id'],
-                    dev_info['port'],
+                    dev_info['port'],  # by-path
                     dev_info.get('usb_location'),
                     dev_info['gate_offset'],
-                    dev_info.get('port_by_path'),
-                    dev_info.get('port_by_id')
+                    dev_info.get('port_tty')  # ttyACM reference
                 )
 
             self.device_mapper.save()

@@ -194,14 +194,14 @@ class StatusCommands:
             if probe_result:
                 verified_devices.append({
                     'device_id': probe_result['device_id'],
-                    'port': port,
+                    'port': probe_result['port'],  # by-path
+                    'port_tty': probe_result.get('port_tty'),  # ttyACM reference
                     'usb_location': usb_location or '',
                     'firmware': probe_result.get('firmware', 'unknown'),
-                    'model': probe_result.get('model', 'ACE'),
-                    'port_by_path': probe_result.get('port_by_path'),
-                    'port_by_id': probe_result.get('port_by_id')
+                    'model': probe_result.get('model', 'ACE')
                 })
-                logging.info(f"StatusCommands: Verified device {probe_result['device_id']} at {port}")
+                logging.info(f"StatusCommands: Verified device {probe_result['device_id']}")
+                logging.info(f"StatusCommands:   by-path: {probe_result['port']}")
 
         # Sort by USB location for deterministic ordering
         verified_devices.sort(key=lambda d: d.get('usb_location', ''))
@@ -210,17 +210,12 @@ class StatusCommands:
         from ..device.ace_device import AceDevice
         for i, dev in enumerate(verified_devices):
             device_id = dev['device_id']
-            port = dev['port']
+            port = dev['port']  # by-path
             gate_offset = i * GATES_PER_ACE
 
-            # Use stable by-path if available, otherwise fallback to regular port
-            port_by_path = dev.get('port_by_path')
-            port_by_id = dev.get('port_by_id')
-            connection_port = port_by_path or port_by_id or port
-
-            # Create AceDevice instance
+            # Create AceDevice instance (port is already by-path)
             ace_instance = AceDevice(
-                port=connection_port,
+                port=port,
                 baud=self.device_manager.baud,
                 device_id=device_id,
                 reactor=self.device_manager.reactor,
@@ -233,12 +228,11 @@ class StatusCommands:
             self.device_manager.ace_devices.append({
                 'name': f"ACE_{i+1}",
                 'device_id': device_id,
-                'port': port,
+                'port': port,  # by-path
+                'port_tty': dev.get('port_tty', ''),  # ttyACM reference
                 'instance': ace_instance,
                 'gate_offset': gate_offset,
-                'usb_location': dev.get('usb_location', ''),
-                'port_by_path': port_by_path,
-                'port_by_id': port_by_id
+                'usb_location': dev.get('usb_location', '')
             })
 
             self.device_manager.device_ids[port] = device_id
@@ -253,11 +247,10 @@ class StatusCommands:
             for dev_info in self.device_manager.ace_devices:
                 self.device_manager.device_mapper.update_device(
                     dev_info['device_id'],
-                    dev_info['port'],
+                    dev_info['port'],  # by-path
                     dev_info.get('usb_location'),
-                    dev_info['gate_offset'],
-                    dev_info.get('port_by_path'),
-                    dev_info.get('port_by_id')
+                    dev_info['gate_offset'),
+                    dev_info.get('port_tty')  # ttyACM reference
                 )
             self.device_manager.device_mapper.save()
 
@@ -463,20 +456,13 @@ class StatusCommands:
                     self.gcode.respond_info(f'   Alias:        {alias}')
                 self.gcode.respond_info(f'   USB Location: {dev.get("usb_location", "Unknown")}')
 
-                # Show port information with stable paths
+                # Show port information (port is now by-path)
                 port = dev.get("port", "N/A")
-                port_by_path = dev.get("port_by_path")
-                port_by_id = dev.get("port_by_id")
+                port_tty = dev.get("port_tty", "")
 
-                if port_by_path:
-                    self.gcode.respond_info(f'   Stable Path:  {port_by_path}')
-                    self.gcode.respond_info(f'   Device Link:  {port} → by-path')
-                elif port_by_id:
-                    self.gcode.respond_info(f'   Stable Path:  {port_by_id}')
-                    self.gcode.respond_info(f'   Device Link:  {port} → by-id')
-                else:
-                    self.gcode.respond_info(f'   Serial Port:  {port}')
-                    self.gcode.respond_info(f'   (Warning: No stable symlink found - port may change across reboots)')
+                self.gcode.respond_info(f'   Serial Path:  {port}')
+                if port_tty:
+                    self.gcode.respond_info(f'   TTY (ref):    {port_tty}')
 
                 self.gcode.respond_info(f'   Gate Range:   {dev["gate_offset"]}-{dev["gate_offset"]+3}')
 
@@ -502,15 +488,13 @@ class StatusCommands:
                             self.gcode.respond_info(f'   Alias:           {alias}')
                         self.gcode.respond_info(f'   USB Location:    {info.get("usb_location", "Unknown")}')
 
-                        # Show stable paths if available
-                        port_by_path = info.get('port_by_path')
-                        port_by_id = info.get('port_by_id')
-                        if port_by_path:
-                            self.gcode.respond_info(f'   Stable Path:     {port_by_path}')
-                        elif port_by_id:
-                            self.gcode.respond_info(f'   Stable Path:     {port_by_id}')
+                        # Show port (now by-path)
+                        port = info.get('port', 'Unknown')
+                        port_tty = info.get('port_tty', '')
+                        self.gcode.respond_info(f'   Last Path:       {port}')
+                        if port_tty:
+                            self.gcode.respond_info(f'   Last TTY:        {port_tty}')
 
-                        self.gcode.respond_info(f'   Last Port:       {info.get("port", "Unknown")}')
                         self.gcode.respond_info(f'   Last Gate Range: {info.get("last_gate_offset", 0)}-{info.get("last_gate_offset", 0)+3}')
 
             # Summary
@@ -530,7 +514,7 @@ class StatusCommands:
             self.gcode.respond_info('Device properties (colors, materials, temps) persist with each device')
             self.gcode.respond_info('Gate offsets are dynamically assigned based on connected device order')
             self.gcode.respond_info('')
-            self.gcode.respond_info('Stable Paths: by-path symlinks are used when available for reliable')
+            self.gcode.respond_info('Serial Path: All devices use /dev/serial/by-path/ for reliable')
             self.gcode.respond_info('             connections that survive reboots and port reordering')
             self.gcode.respond_info('=' * 70)
 
