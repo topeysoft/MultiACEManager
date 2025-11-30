@@ -46,7 +46,15 @@ class ToolCommands:
             'ACE_RETRACT', self.cmd_ACE_RETRACT,
             desc='Retract filament to gate')
 
-        logging.info("ToolCommands: Registered ACE_CHANGE_TOOL, ACE_FEED, ACE_RETRACT")
+        self.gcode.register_command(
+            'ACE_CLEAR_SELECTION', self.cmd_ACE_CLEAR_SELECTION,
+            desc='Clear gate selection without unloading')
+
+        self.gcode.register_command(
+            'ACE_SET_GATE', self.cmd_ACE_SET_GATE,
+            desc='Set selected gate without loading')
+
+        logging.info("ToolCommands: Registered ACE_CHANGE_TOOL, ACE_FEED, ACE_RETRACT, ACE_CLEAR_SELECTION, ACE_SET_GATE")
 
     def cmd_ACE_CHANGE_TOOL(self, gcmd):
         """
@@ -230,6 +238,56 @@ class ToolCommands:
 
         except ValueError as e:
             raise gcmd.error(str(e))
+
+    def cmd_ACE_CLEAR_SELECTION(self, gcmd):
+        """
+        ACE_CLEAR_SELECTION
+
+        Clear selected gate without unloading filament.
+        Updates both runtime state and persistent storage.
+        Used for UI synchronization when manually removing filament.
+        """
+        old_tool = self.controller.current_tool
+
+        # Update runtime state
+        self.controller.current_tool = -1
+
+        # Update persistent storage
+        self.controller.save_variable('ace_current_index', -1, True)
+
+        self.gcode.respond_info(f'ACE: Gate selection cleared (was: {old_tool})')
+        logging.info(f'ToolCommands: Cleared gate selection (was: {old_tool})')
+
+    def cmd_ACE_SET_GATE(self, gcmd):
+        """
+        ACE_SET_GATE GATE=<n>
+
+        Set selected gate without loading filament.
+        Updates both runtime state and persistent storage.
+        Used for UI synchronization when manually loading filament.
+
+        Args:
+            GATE: Gate number to select (-1 to clear, 0-N for specific gate)
+        """
+        gate = gcmd.get_int('GATE', -1)
+
+        if gate < -1 or gate >= self.device_manager.total_gates:
+            raise gcmd.error(f'Invalid gate (valid: -1 or 0-{self.device_manager.total_gates-1})')
+
+        old_tool = self.controller.current_tool
+
+        # Update runtime state
+        self.controller.current_tool = gate
+
+        # Update persistent storage
+        self.controller.save_variable('ace_current_index', gate, True)
+
+        if gate == -1:
+            self.gcode.respond_info('ACE: Gate selection cleared')
+            logging.info(f'ToolCommands: Cleared gate selection (was: {old_tool})')
+        else:
+            self.gcode.respond_info(f'ACE: Selected gate set to {gate} (was: {old_tool})')
+            logging.info(f'ToolCommands: Set gate selection: {old_tool} → {gate}')
 
     # ========================================================================
     # Helper Methods for Tool Change Sequences
