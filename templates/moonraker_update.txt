@@ -1,8 +1,8 @@
 
-[update_manager BunnyACE]
+[update_manager KlipperACE]
 type: git_repo
-path: ~/BunnyACE
-primary_branch: development
-origin: https://github.com/BlackFrogKok/BunnyACE
+path: ~/KlipperACE
+primary_branch: main
+origin: https://github.com/topeysoft/MultiACEManager
 managed_services: klipper
 is_system_service: False

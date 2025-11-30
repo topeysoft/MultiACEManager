@@ -1,15 +1,15 @@
 <div align="center">
 
 <!-- LOGO PLACEHOLDER -->
-<img style="margin-top: 15px; margin-bottom: -15px; margin-left: 25px" src="./.github/img/logo.svg" alt="BunnyACE" width="120" height="120" />
-<h1 style="margin-top: 0">Bunny<span style="color:deepskyblue">ACE</span> </h1>
+<img style="margin-top: 15px; margin-bottom: -15px; margin-left: 25px" src="./.github/img/logo.svg" alt="KlipperACE" width="120" height="120" />
+<h1 style="margin-top: 0">KlipperACE</h1>
 
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE.md)
 ![Status](https://img.shields.io/badge/Status-WIP-orange)
 ![Klipper](https://img.shields.io/badge/Klipper-Module-blue)
 ![Anycubic ACE](https://img.shields.io/badge/Anycubic-ACE%20Pro-8A2BE2)
 
-<p>Driver for Anycubic Color Engine Pro (ACE) for Klipper 🐰🎨</p>
+<p>Driver for Anycubic Color Engine Pro (ACE) for Klipper</p>
 <p>Control filament feed, tool change (up to 16 channels with multi-ACE), ACE dryer, and workflows right from Klipper/G-code.</p>
 
 [Русская версия →](./README.ru.md)
@@ -56,25 +56,25 @@ The script will automatically install the latest driver version.
 Remove/comment any sections about your current filament runout sensor in your printer.cfg since you are going to use extruder filament sensor for runout detection.
 ```bash
 cd ~
-git clone https://github.com/BlackFrogKok/BunnyACE.git
-cd BunnyACE
+git clone https://github.com/topeysoft/MultiACEManager.git KlipperACE
+cd KlipperACE
 ./install.sh
 ```
 
 After installation:
 - Add [include ace.cfg] to your printer.cfg.
-- Moonraker will show an Update Manager entry "BunnyACE" for updates from the web UI.
+- Moonraker will show an Update Manager entry "KlipperACE" for updates from the web UI.
 
 Important: if you already have your own [save_variables], move variables from ace_vars.cfg into your variables file and comment out the [save_variables] block in ace.cfg.
 
 ## 🔄 Update
-- Via Web UI: Moonraker Update Manager → BunnyACE
+- Via Web UI: Moonraker Update Manager → KlipperACE
 
 ## 🗑️ Uninstall
 1) Remove [include ace.cfg] from your Klipper configuration and the update section from moonraker.conf.
 2) Run:
 ```bash
-cd ~/BunnyACE
+cd ~/KlipperACE
 ./install.sh -u
 ```
 
@@ -99,14 +99,14 @@ cd ~/BunnyACE
 - **Physical**: ACE units are daisy-chained for filament path (ACE1 → ACE2 → ACE3...)
 - **USB**: Each ACE creates its own USB device (built-in USB hub)
 - **Communication**: Each ACE reports its own 4 slots independently
-- **BunnyACE Solution**: Use `[ace_manager]` to aggregate multiple ACEs into a unified system
+- **KlipperACE Solution**: Use `[ace_manager]` to aggregate multiple ACEs into a unified system
 
 ### Quick Setup (5 Minutes - 2 ACEs = 8 Gates)
 
 1. **Auto-detect and generate config**:
    ```bash
    cd ~/printer_data/config
-   python3 ~/BunnyACE/probe_ace_ports.py --generate-config
+   python3 ~/KlipperACE/probe_ace_ports.py --generate-config
    ```
 
 2. **Copy the output** to your `ace.cfg` or `printer.cfg`

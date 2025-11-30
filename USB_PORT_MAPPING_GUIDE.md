@@ -229,6 +229,41 @@ ACE_LIST_DEVICES
 - **Extensible**: Easy to add more device properties
 - **Debuggable**: Comprehensive logging and diagnostic commands
 
+## Verifying Stable Paths
+
+### Check Your System
+```bash
+# List all by-path symlinks
+ls -la /dev/serial/by-path/
+
+# List all by-id symlinks
+ls -la /dev/serial/by-id/
+
+# Find which symlinks point to your ACE devices
+for dev in /dev/ttyACM*; do
+    echo "$dev:"
+    find /dev/serial/by-path/ -lname "*$(basename $dev)" 2>/dev/null
+    find /dev/serial/by-id/ -lname "*$(basename $dev)" 2>/dev/null
+done
+```
+
+### Using ACE_SHOW_USB_INFO
+The command automatically shows stable paths being used:
+```gcode
+ACE_SHOW_USB_INFO
+```
+
+Output example:
+```
+✓ Device 1: ACE1
+   ID:           hub_1_port_1_3_4
+   Alias:        ACE1
+   USB Location: 1-1.3.4
+   Serial Path:  /dev/serial/by-path/platform-...-usb-0:1.3.4:1.0
+   TTY (ref):    /dev/ttyACM0
+   Gate Range:   0-3
+```
+
 ## Troubleshooting
 
 ### Q: Device IDs keep changing
@@ -248,6 +283,46 @@ ls -la ~/printer_data/config/ace_device_map.cfg
 
 ### Q: Want to force specific gate order?
 **A:** Physically arrange USB connections in desired order (port 1, 2, 3...). Devices are assigned gates based on USB port order.
+
+### Q: "No /dev/serial/by-path symlink found" error
+**A:** KlipperACE **requires** by-path for operation. This error means:
+- udev is not running or not creating symlinks
+- Device is connected via a virtual/emulated USB port
+- System doesn't have udev properly configured
+
+**Fix:**
+```bash
+# 1. Check if udev is running
+sudo systemctl status udev
+
+# 2. Check if by-path directory exists and has ACE devices
+ls -la /dev/serial/by-path/ | grep -i anycubic
+
+# 3. If directory doesn't exist or is empty, restart udev
+sudo systemctl restart udev
+sudo udevadm trigger
+
+# 4. Reconnect ACE devices (unplug/replug USB)
+
+# 5. Verify symlinks appear
+ls -la /dev/serial/by-path/
+```
+
+**Still not working?**
+- Ensure devices are connected to **physical USB ports** (not USB-over-network)
+- Check udev version: `udevadm --version` (should be 200+)
+- Check Klipper logs for detailed error messages
+
+### Q: Connection fails after reboot
+**A:**
+- Check `ACE_SHOW_USB_INFO` to see current by-path
+- Verify symlinks still exist: `ls -la /dev/serial/by-path/`
+- Check Klipper logs for connection attempts
+- If by-path changed, physical USB port was changed
+- Run `ACE_SCAN_DEVICES APPLY=1` to rediscover
+
+### Q: Can I use KlipperACE on Mac/Windows?
+**A:** No. KlipperACE is designed for Linux only and requires `/dev/serial/by-path/` which is Linux-specific. Mac and Windows don't have equivalent stable path mechanisms that work reliably with USB hubs.
 
 ## Migration from Old System
 
@@ -282,10 +357,51 @@ extruder_sensor_pin: ^EBBCan: PB9
 
 ## Technical Notes
 
+### Stable Device Paths (Linux Only)
+
+**KlipperACE requires `/dev/serial/by-path/` for reliable operation on Linux systems.**
+
+#### Why by-path Only?
+- **Maximum stability**: Based on physical USB topology
+- **Survives reboots**: Device order doesn't matter
+- **Port-specific**: Same USB port = same path always
+- **No ambiguity**: One path per physical port
+- **Linux standard**: Guaranteed by udev on all modern Linux distributions
+
+#### Path Format
+```
+/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.3.1.3:1.0
+```
+
+Breaking down the path:
+- `platform-fd500000.pcie`: PCI bus controller
+- `pci-0000:01:00.0`: PCI device address
+- `usb-0:1.3.1.3`: USB topology (bus 0, hub ports 1.3.1.3)
+- `:1.0`: USB interface number
+
+#### How It Works
+- On device discovery, KlipperACE **requires** `/dev/serial/by-path/` symlink
+- Devices without by-path symlinks are **rejected** with a warning
+- Stores by-path in `ace_device_map.cfg`:
+  ```
+  hub_1_port_3 = /dev/serial/by-path/platform-...-usb-0:1.3.1.3:1.0, 0, timestamp, 1-1.3, ACE1, /dev/ttyACM0
+  ```
+- **All connections** use by-path exclusively
+- User sees friendly names (aliases like "ACE1") while system uses by-path internally
+- `/dev/ttyACM*` is stored for reference/logging only
+
+#### Benefits
+- **Absolute reliability**: Path never changes unless USB port changes
+- **No boot order dependency**: Plug devices in any order
+- **Hot-swap safe**: Remove and reconnect anytime
+- **Zero ambiguity**: Physical port = unique path
+- **Future proof**: Consistent across all Linux distributions
+
 ### USB Location Format
 - **Format**: `1-1.2` means Bus 1, Port 1, Sub-port 2
-- **Converted to**: `hub_1_port_1_2` (readable)
+- **Converted to**: `hub_1_port_1_2` (readable device_id)
 - **Stability**: Only changes if physical USB topology changes
+- **Used for**: Device identification (device_id), not connections
 
 ### Device ID Priority
 1. **USB Location** (default for this implementation)
@@ -295,5 +411,6 @@ extruder_sensor_pin: ^EBBCan: PB9
 
 ### Performance
 - **Startup**: +1-2 seconds for USB enumeration
+- **Symlink Resolution**: <10ms per device
 - **Runtime**: No performance impact
-- **Storage**: ~1KB per device in `ace_device_map.cfg`
+- **Storage**: ~2KB per device in `ace_device_map.cfg` (includes stable paths)

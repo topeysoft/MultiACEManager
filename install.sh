@@ -237,7 +237,7 @@ install_requirements()
 
 uninstall()
 {
-    echo "Uninstalling BunnyACE..."
+    echo "Uninstalling KlipperACE..."
     echo ""
 
     # Uninstall ACE package (contains both legacy and modular)
@@ -290,7 +290,7 @@ uninstall()
     echo "========================================="
     echo ""
     echo "Manual cleanup required:"
-    echo "  1. Remove [update_manager BunnyACE] from moonraker.conf"
+    echo "  1. Remove [update_manager KlipperACE] from moonraker.conf"
     echo "  2. Remove [ace_manager] from moonraker.conf"
     echo "  3. Remove ACE configuration from printer.cfg"
     echo "  4. Optionally remove config files (see above)"
@@ -415,7 +415,7 @@ add_updater()
 {
     echo -n "Adding update manager to moonraker.conf... "
     update_section=0
-    update_section=$(grep -c '\[update_manager[a-z ]* BunnyACE\]' "${MOONRAKER_CONFIG_DIR}/moonraker.conf" || true)
+    update_section=$(grep -c '\[update_manager[a-z ]* KlipperACE\]' "${MOONRAKER_CONFIG_DIR}/moonraker.conf" || true)
     if [ "$update_section" -eq 0 ]; then
         echo "\n" >> ${MOONRAKER_CONFIG_DIR}/moonraker.conf
         while read -r line; do

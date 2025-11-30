@@ -1,11 +1,11 @@
-# BunnyACE Quick Reference Card
+# KlipperACE Quick Reference Card
 
 ## 🚀 5-Minute Multi-ACE Setup
 
 ```bash
 # 1. Auto-detect ACE devices and generate config
 cd ~/printer_data/config
-python3 ~/BunnyACE/probe_ace_ports.py --generate-config
+python3 ~/KlipperACE/probe_ace_ports.py --generate-config
 
 # 2. Copy output to ace.cfg
 
@@ -152,7 +152,7 @@ serial_ports: /dev/ttyACM1, /dev/ttyACM0
 ### Commands not found
 ```bash
 # Install/reinstall ace.py
-cd ~/BunnyACE
+cd ~/KlipperACE
 ./install.sh
 sudo systemctl restart klipper
 ```
@@ -160,7 +160,7 @@ sudo systemctl restart klipper
 ## 📁 File Locations
 
 ```
-~/BunnyACE/                              # Repo
+~/KlipperACE/                              # Repo
   ├── extras/ace.py                      # Main module
   ├── probe_ace_ports.py                 # Detection tool
   ├── ace_manager_simple.cfg             # Simple config
@@ -248,7 +248,7 @@ T2
 
 ## 🔗 Quick Links
 
-- **GitHub:** https://github.com/BlackFrogKok/BunnyACE
+- **GitHub:** https://github.com/topeysoft/MultiACEManager
 - **Issues:** Report bugs and ask questions
 - **Wiki:** Community tips and tricks
 
@@ -294,4 +294,4 @@ gcode: ACE_CHANGE_TOOL TOOL=7
 ---
 
 **Last Updated:** 2025-11-26
-**For:** BunnyACE v2.0+ with multi-ACE support
+**For:** KlipperACE v2.0+ with multi-ACE support

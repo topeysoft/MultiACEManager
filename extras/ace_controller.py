@@ -8,7 +8,7 @@ import logging
 from .device import AceDeviceManager
 from .sensors import MmuRunoutHelper
 from .exceptions import AceException
-from .commands import ToolCommands, ConfigCommands, StatusCommands
+from .commands import ToolCommands, ConfigCommands, StatusCommands, DryerCommands
 
 
 class AceController:
@@ -111,6 +111,7 @@ class AceController:
         self.tool_commands = None
         self.config_commands = None
         self.status_commands = None
+        self.dryer_commands = None
 
         # Register event handlers
         self.printer.register_event_handler('klippy:ready', self._handle_ready)
@@ -250,11 +251,13 @@ class AceController:
         self.tool_commands = ToolCommands(self)
         self.config_commands = ConfigCommands(self)
         self.status_commands = StatusCommands(self)
+        self.dryer_commands = DryerCommands(self)
 
         # Register all commands
         self.tool_commands.register()
         self.config_commands.register()
         self.status_commands.register()
+        self.dryer_commands.register()
 
         logging.info("AceController: All G-code commands registered")
 

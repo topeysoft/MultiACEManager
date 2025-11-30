@@ -1,4 +1,4 @@
-# BunnyACE Requirements
+# KlipperACE Requirements
 # Python dependencies for ACE Manager
 
 # Serial communication

@@ -1,6 +1,6 @@
-# BunnyACE Installation Guide
+# KlipperACE Installation Guide
 
-Complete installation guide for BunnyACE with ACE Manager and Moonraker integration.
+Complete installation guide for KlipperACE with ACE Manager and Moonraker integration.
 
 ---
 
@@ -10,8 +10,8 @@ Complete installation guide for BunnyACE with ACE Manager and Moonraker integrat
 
 ```bash
 cd ~/
-git clone https://github.com/yourusername/BunnyACE.git
-cd BunnyACE
+git clone https://github.com/yourusername/KlipperACE.git
+cd KlipperACE
 ./install.sh
 ```
 
@@ -29,7 +29,7 @@ This will automatically:
 
 ### 1. Klipper Extension
 **File**: `~/klipper/klippy/extras/ace.py` (symlink)
-- Provides ACE Manager and BunnyACE classes
+- Provides ACE Manager and KlipperACE classes
 - GCode commands (ACE_CHANGE_TOOL, ACE_SCAN_DEVICES, etc.)
 - USB device auto-detection
 - Multi-device management
@@ -48,7 +48,7 @@ This will automatically:
 ### 4. Moonraker Configuration
 **File**: `~/printer_data/config/moonraker.conf`
 - Adds `[ace_manager]` section
-- Adds `[update_manager BunnyACE]` section
+- Adds `[update_manager KlipperACE]` section
 
 ---
 
@@ -60,26 +60,26 @@ If you prefer to install manually or need more control:
 
 ```bash
 cd ~/
-git clone https://github.com/yourusername/BunnyACE.git
-cd BunnyACE
+git clone https://github.com/yourusername/KlipperACE.git
+cd KlipperACE
 ```
 
 ### Step 2: Install Klipper Extension
 
 ```bash
-ln -sf ~/BunnyACE/extras/ace.py ~/klipper/klippy/extras/ace.py
+ln -sf ~/KlipperACE/extras/ace.py ~/klipper/klippy/extras/ace.py
 ```
 
 ### Step 3: Install Moonraker Component
 
 ```bash
-ln -sf ~/BunnyACE/moonraker/ace_manager.py ~/moonraker/moonraker/components/ace_manager.py
+ln -sf ~/KlipperACE/moonraker/ace_manager.py ~/moonraker/moonraker/components/ace_manager.py
 ```
 
 ### Step 4: Install Python Dependencies
 
 ```bash
-~/klippy-env/bin/pip install -r ~/BunnyACE/requirements.txt
+~/klippy-env/bin/pip install -r ~/KlipperACE/requirements.txt
 ```
 
 ### Step 5: Configure Moonraker
@@ -90,11 +90,11 @@ Add to `~/printer_data/config/moonraker.conf`:
 # ACE Manager REST API component
 [ace_manager]
 
-# Update manager for BunnyACE
-[update_manager BunnyACE]
+# Update manager for KlipperACE
+[update_manager KlipperACE]
 type: git_repo
-path: ~/BunnyACE
-origin: https://github.com/yourusername/BunnyACE.git
+path: ~/KlipperACE
+origin: https://github.com/yourusername/KlipperACE.git
 primary_branch: main
 managed_services: klipper moonraker
 ```
@@ -102,8 +102,8 @@ managed_services: klipper moonraker
 ### Step 6: Copy Configuration Files
 
 ```bash
-cp ~/BunnyACE/ace.cfg ~/printer_data/config/
-cp ~/BunnyACE/ace_vars.cfg ~/printer_data/config/
+cp ~/KlipperACE/ace.cfg ~/printer_data/config/
+cp ~/KlipperACE/ace_vars.cfg ~/printer_data/config/
 ```
 
 ### Step 7: Restart Services
@@ -161,7 +161,7 @@ See [ace_manager_example.cfg](ace_manager_example.cfg) for complete configuratio
 # Verify symlink exists
 ls -l ~/klipper/klippy/extras/ace.py
 
-# Should show: ace.py -> /home/pi/BunnyACE/extras/ace.py
+# Should show: ace.py -> /home/pi/KlipperACE/extras/ace.py
 ```
 
 ### 2. Check Moonraker Installation
@@ -170,7 +170,7 @@ ls -l ~/klipper/klippy/extras/ace.py
 # Verify component exists
 ls -l ~/moonraker/moonraker/components/ace_manager.py
 
-# Should show: ace_manager.py -> /home/pi/BunnyACE/moonraker/ace_manager.py
+# Should show: ace_manager.py -> /home/pi/KlipperACE/moonraker/ace_manager.py
 ```
 
 ### 3. Check Moonraker Logs
@@ -211,7 +211,7 @@ curl http://localhost:7125/server/ace/status
 ### Automatic Uninstall
 
 ```bash
-cd ~/BunnyACE
+cd ~/KlipperACE
 ./install.sh -u
 ```
 
@@ -235,7 +235,7 @@ After running uninstall script, you should also:
    ```ini
    # Remove these sections:
    [ace_manager]
-   [update_manager BunnyACE]
+   [update_manager KlipperACE]
    ```
 
 3. **Remove configuration files** (optional):
@@ -246,7 +246,7 @@ After running uninstall script, you should also:
 
 4. **Delete repository** (optional):
    ```bash
-   rm -rf ~/BunnyACE
+   rm -rf ~/KlipperACE
    ```
 
 5. **Restart services**:
@@ -340,12 +340,12 @@ If you installed with git, use Moonraker's update manager:
 
 1. Open Mainsail/Fluidd
 2. Navigate to "Machine" → "Update Manager"
-3. Find "BunnyACE" and click "Update"
+3. Find "KlipperACE" and click "Update"
 
 ### Manual Update
 
 ```bash
-cd ~/BunnyACE
+cd ~/KlipperACE
 git pull
 sudo systemctl restart klipper
 sudo systemctl restart moonraker
@@ -392,8 +392,8 @@ After successful installation:
 
 ## Support
 
-- **Issues**: https://github.com/yourusername/BunnyACE/issues
-- **Documentation**: https://github.com/yourusername/BunnyACE/wiki
+- **Issues**: https://github.com/yourusername/KlipperACE/issues
+- **Documentation**: https://github.com/yourusername/KlipperACE/wiki
 - **Discord**: [Your Discord link]
 
 ---

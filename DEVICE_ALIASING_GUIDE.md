@@ -1,8 +1,8 @@
-# BunnyACE Device Aliasing Guide
+# KlipperACE Device Aliasing Guide
 
 ## Overview
 
-BunnyACE now supports friendly device aliases, allowing you to reference devices by human-readable names instead of technical USB port identifiers.
+KlipperACE supports friendly device aliases, allowing you to reference devices by human-readable names instead of technical USB port identifiers.
 
 ## Features
 
@@ -22,6 +22,7 @@ ACE_SHOW_USB_INFO
 ```
 
 Output example:
+
 ```
 ======================================================================
 ACE USB Port Mapping & Device Topology
@@ -69,15 +70,18 @@ ACE_LIST_DEVICES
 Set or update a device alias.
 
 **Syntax:**
+
 ```gcode
 ACE_ALIAS DEVICE=<device_id_or_alias> NAME=<new_alias>
 ```
 
 **Parameters:**
+
 - `DEVICE`: The device ID (e.g., `hub_1_port_2`) or existing alias
 - `NAME`: The new alias (alphanumeric and underscore only)
 
 **Examples:**
+
 ```gcode
 ACE_ALIAS DEVICE=hub_1_port_2 NAME=ACE1
 ACE_ALIAS DEVICE=hub_1_port_3 NAME=top_left
@@ -90,11 +94,13 @@ ACE_ALIAS DEVICE=ACE1 NAME=front_unit  # Change existing alias
 Remove an alias from a device.
 
 **Syntax:**
+
 ```gcode
 ACE_UNALIAS DEVICE=<device_id_or_alias>
 ```
 
 **Examples:**
+
 ```gcode
 ACE_UNALIAS DEVICE=ACE1
 ACE_UNALIAS DEVICE=hub_1_port_2
@@ -105,11 +111,13 @@ ACE_UNALIAS DEVICE=hub_1_port_2
 List all defined device aliases with their connection status.
 
 **Syntax:**
+
 ```gcode
 ACE_LIST_ALIASES
 ```
 
 **Example output:**
+
 ```
 ======================================================================
 Device Aliases
@@ -125,6 +133,7 @@ Total: 3 aliases defined
 ```
 
 **Use cases:**
+
 - Check what aliases you've set
 - See connection status of aliased devices
 - Verify alias names before using them in commands
@@ -133,7 +142,9 @@ Total: 3 aliases defined
 ## Common Naming Schemes
 
 ### Sequential Naming
+
 Simple numbering scheme:
+
 ```gcode
 ACE_ALIAS DEVICE=hub_1_port_1 NAME=ACE1
 ACE_ALIAS DEVICE=hub_1_port_2 NAME=ACE2
@@ -142,7 +153,9 @@ ACE_ALIAS DEVICE=hub_1_port_4 NAME=ACE4
 ```
 
 ### Positional Naming
+
 Based on physical location:
+
 ```gcode
 ACE_ALIAS DEVICE=hub_1_port_1 NAME=top_left
 ACE_ALIAS DEVICE=hub_1_port_2 NAME=top_right
@@ -151,7 +164,9 @@ ACE_ALIAS DEVICE=hub_1_port_4 NAME=bottom_right
 ```
 
 ### Descriptive Naming
+
 Based on function or location:
+
 ```gcode
 ACE_ALIAS DEVICE=hub_1_port_1 NAME=main_tower
 ACE_ALIAS DEVICE=hub_1_port_2 NAME=support_materials
@@ -163,6 +178,7 @@ ACE_ALIAS DEVICE=hub_1_port_3 NAME=specialty_filaments
 Once set, aliases work everywhere a device ID would:
 
 ### Status Commands
+
 ```gcode
 ACE_GET_STATUS DEVICE=ACE1
 ACE_LIST_DEVICES  # Shows aliases in output
@@ -170,6 +186,7 @@ ACE_SHOW_USB_INFO # Displays aliases prominently
 ```
 
 ### Configuration Commands
+
 ```gcode
 # Device-relative gates (GATE 0-3 per device)
 ACE_GATE_MAP DEVICE=top_left GATE=0 COLOR=FF0000 TYPE=PLA TEMP=210
@@ -181,10 +198,12 @@ ACE_GATE_MAP GATE=5 COLOR=0000FF TYPE=ABS TEMP=250   # Gate 5 globally
 ```
 
 **Important:** When using `DEVICE` parameter with `ACE_GATE_MAP`:
+
 - `GATE` is **relative to the device** (0-3)
 - Without `DEVICE`, `GATE` is **global** (0-N where N = total gates - 1)
 
 Example with 2 devices:
+
 - `ACE_GATE_MAP DEVICE=ACE1 GATE=0` → Configures global gate 0 (first gate on ACE1)
 - `ACE_GATE_MAP DEVICE=ACE2 GATE=0` → Configures global gate 4 (first gate on ACE2)
 - `ACE_GATE_MAP GATE=5` → Configures global gate 5 (second gate on ACE2)
@@ -198,6 +217,7 @@ During installation, you can optionally set up aliases:
 ```
 
 The installer will ask if you want to configure device aliases and offer preset naming schemes:
+
 1. Sequential (ACE1, ACE2, ACE3, ...)
 2. Positional (top_left, top_right, bottom_left, bottom_right)
 3. Custom (you choose each name)
@@ -218,18 +238,23 @@ Format: `device_id = port, gate_offset, timestamp, usb_location, alias`
 ## Technical Details
 
 ### Alias Resolution
+
 The system resolves aliases in the following order:
+
 1. Check if input is an alias → resolve to device_id
 2. Check if input is a device_id → use directly
 3. Not found → error
 
 ### Alias Validation
+
 Aliases must:
+
 - Be unique (no two devices can have the same alias)
 - Contain only letters, numbers, and underscores
 - Not be empty
 
 ### Persistence
+
 - Aliases persist across reboots
 - Aliases follow the physical device (USB port)
 - If a device is moved to a different USB port, it keeps its alias
@@ -311,21 +336,27 @@ ACE_LIST_ALIASES
 ## Troubleshooting
 
 ### Alias Already in Use
+
 ```
 Error: Alias 'ACE1' already in use by device hub_1_port_2
 ```
+
 **Solution**: Choose a different alias or remove the existing one first with `ACE_UNALIAS`
 
 ### Device Not Found
+
 ```
 Error: Device "ACE1" not found
 ```
+
 **Solution**: Check device is connected with `ACE_LIST_DEVICES` or `ACE_SHOW_USB_INFO`
 
 ### Invalid Alias Format
+
 ```
 Error: Alias must contain only letters, numbers, and underscores
 ```
+
 **Solution**: Use only alphanumeric characters and underscores (no spaces, hyphens, or special characters)
 
 ## See Also

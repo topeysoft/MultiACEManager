@@ -17,7 +17,7 @@ Copy the ACE Manager Moonraker component to your Moonraker installation:
 cd ~/moonraker/moonraker/components
 
 # Copy the ACE Manager component
-cp /path/to/BunnyACE/moonraker/ace_manager.py ./
+cp /path/to/KlipperACE/moonraker/ace_manager.py ./
 
 # Restart Moonraker
 sudo systemctl restart moonraker
