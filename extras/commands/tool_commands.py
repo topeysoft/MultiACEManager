@@ -8,6 +8,7 @@ Commands:
 """
 
 import logging
+from ..exceptions import AceException
 
 
 class ToolCommands:
@@ -158,7 +159,7 @@ class ToolCommands:
 
         # 2. Feed from extruder to toolhead sensor
         self.gcode.respond_info('ACE: Feeding to toolhead sensor')
-        self._feed_to_toolhead()
+        self._feed_to_toolhead(tool)
 
         # 3. Feed from toolhead sensor to nozzle
         self.gcode.respond_info('ACE: Feeding to nozzle')
@@ -321,6 +322,157 @@ class ToolCommands:
     def _feed_to_extruder(self, tool):
         """
         Feed filament from gate to extruder sensor using ACE device.
+        Monitors extruder sensor and stops feeding when triggered.
+
+        Args:
+            tool: Tool (gate) number
+        """
+        if self.controller.extruder_sensor is None:
+            logging.warning('ToolCommands: No extruder sensor configured, using fixed distance')
+            # Fallback to fixed distance feed if no sensor
+            try:
+                device, local_gate = self.device_manager.get_device_for_gate(tool)
+
+                def callback(response):
+                    if 'code' in response and response['code'] != 0:
+                        self.gcode.respond_info(f"ACE Error: {response.get('msg', 'Unknown error')}")
+
+                length = self.controller.toolchange_feed_length
+                speed = self.controller.feed_speed
+
+                device.feed(local_gate, length, speed, callback)
+                device.wait_ready()
+
+            except ValueError as e:
+                logging.error(f'ToolCommands: Failed to feed to extruder: {e}')
+            return
+
+        # Sensor-monitored feeding approach
+        try:
+            device, local_gate = self.device_manager.get_device_for_gate(tool)
+
+            # Wait for device to be ready
+            device.wait_ready()
+
+            # Start feeding with extra length (we'll stop when sensor triggers)
+            # Feed length + extra distance to ensure we reach the sensor
+            feed_length = self.controller.toolchange_feed_length + self.controller.toolhead_homing_max
+            feed_speed = self.controller.feed_speed
+
+            def feed_callback(response):
+                if 'code' in response and response['code'] != 0:
+                    self.gcode.respond_info(f"ACE Error: {response.get('msg', 'Unknown error')}")
+
+            # Start the feed operation (non-blocking)
+            device.feed(local_gate, feed_length, feed_speed, feed_callback)
+
+            # Track when we started and when to slow down
+            start_time = self.reactor.monotonic()
+            slowdown_time = self.controller.toolchange_feed_length / self.controller.feed_speed
+            has_slowed = False
+
+            # Monitor sensor in a loop
+            timeout = 60.0  # 60 second timeout
+            while not self._check_sensor(self.controller.extruder_sensor):
+                # Check if we should slow down for accuracy
+                elapsed = self.reactor.monotonic() - start_time
+                if not has_slowed and elapsed >= slowdown_time:
+                    logging.info('ToolCommands: Slowing feed speed for sensor approach')
+                    self._set_feeding_speed(tool, self.controller.toolhead_homing_speed)
+                    has_slowed = True
+
+                # Check if device finished (sensor never triggered - error)
+                if device.is_ready():
+                    raise AceException(f'ACE Error: Load failed - extruder sensor not triggered')
+
+                # Check for timeout
+                if elapsed > timeout:
+                    self._stop_feeding(tool)
+                    raise AceException(f'ACE Error: Load timeout - extruder sensor not triggered after {timeout}s')
+
+                # Small delay before checking again (10ms polling)
+                self.dwell(delay=0.01)
+
+            # Sensor triggered! Stop feeding immediately
+            logging.info('ToolCommands: Extruder sensor triggered, stopping feed')
+            self._stop_feeding(tool)
+
+            # Wait for device to complete the stop
+            device.wait_ready()
+
+            logging.info('ToolCommands: Successfully fed to extruder sensor')
+
+        except ValueError as e:
+            logging.error(f'ToolCommands: Failed to feed to extruder: {e}')
+            raise
+
+    def _feed_to_toolhead(self, tool):
+        """
+        Feed filament from extruder sensor to toolhead sensor using extruder motor.
+        Monitors toolhead sensor and stops when triggered.
+
+        Args:
+            tool: Tool (gate) number for feed assist
+        """
+        if self.controller.toolhead_sensor is None:
+            logging.warning('ToolCommands: No toolhead sensor configured, using fixed distance')
+            # Feed a default distance if no sensor
+            self._extruder_move(self.controller.toolhead_homing_max, self.controller.extruder_move_speed)
+            return
+
+        # Enable feed assist to help pull filament through
+        self._enable_feed_assist(tool)
+
+        # Wait a moment for feed assist to engage
+        self.dwell(delay=0.1)
+
+        # Incrementally move extruder while monitoring toolhead sensor
+        timeout = 60.0  # 60 second timeout
+        start_time = self.reactor.monotonic()
+
+        logging.info('ToolCommands: Feeding to toolhead sensor with incremental moves')
+
+        while not self._check_sensor(self.controller.toolhead_sensor):
+            # Check for timeout
+            elapsed = self.reactor.monotonic() - start_time
+            if elapsed > timeout:
+                self._disable_feed_assist(tool)
+                raise AceException(f'ACE Error: Load timeout - toolhead sensor not triggered after {timeout}s')
+
+            # Move 1mm at a time
+            self._extruder_move(1.0, self.controller.extruder_move_speed)
+
+            # Small delay before next move (10ms polling)
+            self.dwell(delay=0.01)
+
+        # Sensor triggered! Disable feed assist
+        logging.info('ToolCommands: Toolhead sensor triggered')
+        self._disable_feed_assist(tool)
+
+        logging.info('ToolCommands: Successfully fed to toolhead sensor')
+
+    def _feed_to_nozzle(self):
+        """
+        Feed filament from toolhead sensor to nozzle.
+        """
+        # Feed the configured sensor-to-nozzle distance
+        feed_length = self.controller.toolhead_sensor_to_nozzle_length
+        if feed_length > 0:
+            self._extruder_move(feed_length, self.controller.extruder_move_speed)
+
+    def dwell(self, delay=1.0):
+        """
+        Pause reactor for specified delay.
+
+        Args:
+            delay: Time to pause in seconds
+        """
+        curr_time = self.reactor.monotonic()
+        self.reactor.pause(curr_time + delay)
+
+    def _stop_feeding(self, tool):
+        """
+        Stop feeding for specified tool.
 
         Args:
             tool: Tool (gate) number
@@ -332,43 +484,67 @@ class ToolCommands:
                 if 'code' in response and response['code'] != 0:
                     self.gcode.respond_info(f"ACE Error: {response.get('msg', 'Unknown error')}")
 
-            length = self.controller.toolchange_feed_length
-            speed = self.controller.feed_speed
-
-            device.feed(local_gate, length, speed, callback)
-            device.wait_ready()
+            device.stop_feeding(local_gate, callback)
 
         except ValueError as e:
-            logging.error(f'ToolCommands: Failed to feed to extruder: {e}')
+            logging.error(f'ToolCommands: Failed to stop feeding: {e}')
 
-    def _feed_to_toolhead(self):
+    def _set_feeding_speed(self, tool, speed):
         """
-        Feed filament from extruder sensor to toolhead sensor using extruder motor.
-        """
-        if self.controller.toolhead_sensor is None:
-            logging.warning('ToolCommands: No toolhead sensor configured, using fixed distance')
-            # Feed a default distance if no sensor
-            self._extruder_move(self.controller.toolhead_homing_max, self.controller.extruder_move_speed)
-            return
+        Update feeding speed for specified tool.
 
-        # Home to toolhead sensor by feeding
-        max_feed = self.controller.toolhead_homing_max
-        homing_speed = self.controller.toolhead_homing_speed
-
-        # Feed until toolhead sensor is triggered
-        endstop = self.controller.endstops.get('toolhead_sensor')
-        if endstop:
-            # Use manual homing approach
-            self._extruder_move(max_feed, homing_speed)
-        else:
-            # Fallback: feed configured distance
-            self._extruder_move(max_feed, homing_speed)
-
-    def _feed_to_nozzle(self):
+        Args:
+            tool: Tool (gate) number
+            speed: New feed speed in mm/s
         """
-        Feed filament from toolhead sensor to nozzle.
+        try:
+            device, local_gate = self.device_manager.get_device_for_gate(tool)
+
+            def callback(response):
+                if 'code' in response and response['code'] != 0:
+                    self.gcode.respond_info(f"ACE Error: {response.get('msg', 'Unknown error')}")
+
+            device.update_feeding_speed(local_gate, speed, callback)
+
+        except ValueError as e:
+            logging.error(f'ToolCommands: Failed to update feeding speed: {e}')
+
+    def _enable_feed_assist(self, tool):
         """
-        # Feed the configured sensor-to-nozzle distance
-        feed_length = self.controller.toolhead_sensor_to_nozzle_length
-        if feed_length > 0:
-            self._extruder_move(feed_length, self.controller.extruder_move_speed)
+        Enable feed assist for specified tool.
+
+        Args:
+            tool: Tool (gate) number
+        """
+        try:
+            device, local_gate = self.device_manager.get_device_for_gate(tool)
+
+            def callback(response):
+                if 'code' in response and response['code'] != 0:
+                    self.gcode.respond_info(f"ACE Error: {response.get('msg', 'Unknown error')}")
+
+            device.start_feed_assist(local_gate, callback)
+            logging.info(f'ToolCommands: Enabled feed assist for tool {tool}')
+
+        except ValueError as e:
+            logging.error(f'ToolCommands: Failed to enable feed assist: {e}')
+
+    def _disable_feed_assist(self, tool):
+        """
+        Disable feed assist for specified tool.
+
+        Args:
+            tool: Tool (gate) number
+        """
+        try:
+            device, local_gate = self.device_manager.get_device_for_gate(tool)
+
+            def callback(response):
+                if 'code' in response and response['code'] != 0:
+                    self.gcode.respond_info(f"ACE Error: {response.get('msg', 'Unknown error')}")
+
+            device.stop_feed_assist(local_gate, callback)
+            logging.info(f'ToolCommands: Disabled feed assist for tool {tool}')
+
+        except ValueError as e:
+            logging.error(f'ToolCommands: Failed to disable feed assist: {e}')
