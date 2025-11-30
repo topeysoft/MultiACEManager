@@ -69,18 +69,11 @@ class ToolCommands:
         logging.info(f'ToolCommands: Tool change {was} => {tool}')
         self.gcode.respond_info(f'ACE: Tool change {was} => {tool}')
 
-        # TODO: Implement full tool change sequence
-        # This is a simplified version - full implementation would include:
-        # - Unload from current tool (if was >= 0)
-        #   - Retract to toolhead sensor
-        #   - Execute cut/poop macros
-        #   - Retract to gate
-        #   - Park filament
-        # - Load to new tool (if tool >= 0)
-        #   - Feed from gate
-        #   - Home to toolhead sensor
-        #   - Feed to nozzle
-        #   - Prime/purge
+        # Execute pre-toolchange macro
+        try:
+            self.gcode.run_script_from_command(f'_ACE_PRE_TOOLCHANGE FROM={was} TO={tool}')
+        except Exception as e:
+            logging.warning(f'ToolCommands: Pre-toolchange macro failed: {e}')
 
         if tool == -1:
             # Unload sequence
@@ -93,6 +86,12 @@ class ToolCommands:
             if was >= 0:
                 self._unload_tool(was)
             self._load_tool(tool)
+
+        # Execute post-toolchange macro
+        try:
+            self.gcode.run_script_from_command(f'_ACE_POST_TOOLCHANGE FROM={was} TO={tool}')
+        except Exception as e:
+            logging.warning(f'ToolCommands: Post-toolchange macro failed: {e}')
 
         # Update current tool
         self.controller.current_tool = tool
