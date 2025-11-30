@@ -390,6 +390,8 @@ class AceDevice:
                             self.gate_status = ['empty'] * self.num_gates
                             logging.info(f'AceDevice: Detected {self.num_gates} gates')
                     self.gate_status = [data['status'] for data in self._info.get('slots', [])]
+                    # Reset error counter on successful status poll to prevent false disconnections
+                    self._consecutive_write_errors = 0
 
             with self._lock:
                 can_send = not self._request_in_flight
