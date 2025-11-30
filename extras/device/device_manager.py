@@ -103,7 +103,9 @@ class AceDeviceManager:
                     'port': port,
                     'usb_location': usb_location or '',
                     'firmware': probe_result.get('firmware', 'unknown'),
-                    'model': probe_result.get('model', 'ACE')
+                    'model': probe_result.get('model', 'ACE'),
+                    'port_by_path': probe_result.get('port_by_path'),
+                    'port_by_id': probe_result.get('port_by_id')
                 })
                 logging.info(f"AceDeviceManager: Found device {probe_result['device_id']} at {port}")
 
@@ -116,9 +118,21 @@ class AceDeviceManager:
             port = dev['port']
             gate_offset = i * GATES_PER_ACE
 
+            # Use stable by-path if available, otherwise fallback to regular port
+            port_by_path = dev.get('port_by_path')
+            port_by_id = dev.get('port_by_id')
+            connection_port = port_by_path or port_by_id or port
+
+            if port_by_path:
+                logging.info(f"AceDeviceManager: Using by-path for {device_id}: {port_by_path}")
+            elif port_by_id:
+                logging.info(f"AceDeviceManager: Using by-id for {device_id}: {port_by_id}")
+            else:
+                logging.info(f"AceDeviceManager: Using regular port for {device_id}: {port}")
+
             # Create AceDevice instance
             ace_instance = AceDevice(
-                port=port,
+                port=connection_port,
                 baud=self.baud,
                 device_id=device_id,
                 reactor=self.reactor,
@@ -134,7 +148,9 @@ class AceDeviceManager:
                 'port': port,
                 'instance': ace_instance,
                 'gate_offset': gate_offset,
-                'usb_location': dev.get('usb_location', '')
+                'usb_location': dev.get('usb_location', ''),
+                'port_by_path': dev.get('port_by_path'),
+                'port_by_id': dev.get('port_by_id')
             })
 
             self.device_ids[port] = device_id
@@ -153,7 +169,9 @@ class AceDeviceManager:
                     dev_info['device_id'],
                     dev_info['port'],
                     dev_info.get('usb_location'),
-                    dev_info['gate_offset']
+                    dev_info['gate_offset'],
+                    dev_info.get('port_by_path'),
+                    dev_info.get('port_by_id')
                 )
 
             self.device_mapper.save()

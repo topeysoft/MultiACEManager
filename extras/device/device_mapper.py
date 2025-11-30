@@ -49,12 +49,16 @@ class AceDeviceMapper:
                 parts = [p.strip() for p in value.split(',')]
                 if len(parts) >= 2:
                     alias = parts[4] if len(parts) > 4 else ''
+                    port_by_path = parts[5] if len(parts) > 5 else ''
+                    port_by_id = parts[6] if len(parts) > 6 else ''
                     self.device_map[device_id] = {
                         'port': parts[0],
                         'usb_location': parts[3] if len(parts) > 3 else '',
                         'last_seen': int(parts[2]) if len(parts) > 2 else 0,
                         'last_gate_offset': int(parts[1]) if len(parts) > 1 else 0,  # Informational only
                         'alias': alias,
+                        'port_by_path': port_by_path,  # Stable /dev/serial/by-path symlink
+                        'port_by_id': port_by_id,      # Stable /dev/serial/by-id symlink
                         'properties': {}
                     }
                     # Build alias lookup
@@ -74,6 +78,8 @@ class AceDeviceMapper:
                         'last_seen': 0,
                         'last_gate_offset': 0,
                         'alias': '',
+                        'port_by_path': '',
+                        'port_by_id': '',
                         'properties': {}
                     }
 
@@ -99,7 +105,9 @@ class AceDeviceMapper:
             # Sanitize device_id for use as config option name
             safe_id = AceDeviceDiscovery.sanitize_device_id(device_id)
             alias = info.get('alias', '')
-            value = f"{info['port']}, {info['last_gate_offset']}, {int(time.time())}, {info.get('usb_location', '')}, {alias}"
+            port_by_path = info.get('port_by_path', '')
+            port_by_id = info.get('port_by_id', '')
+            value = f"{info['port']}, {info['last_gate_offset']}, {int(time.time())}, {info.get('usb_location', '')}, {alias}, {port_by_path}, {port_by_id}"
             parser.set('ace_device_map', safe_id, value)
 
         # Save device-specific properties in separate sections
@@ -125,7 +133,7 @@ class AceDeviceMapper:
             f.write('# Device properties (colors, materials, temps) persist with the device\n\n')
             parser.write(f)
 
-    def update_device(self, device_id, port, usb_location=None, current_gate_offset=None):
+    def update_device(self, device_id, port, usb_location=None, current_gate_offset=None, port_by_path=None, port_by_id=None):
         """Update or add a device mapping"""
         if device_id not in self.device_map:
             self.device_map[device_id] = {
@@ -134,6 +142,8 @@ class AceDeviceMapper:
                 'last_seen': int(time.time()),
                 'last_gate_offset': current_gate_offset if current_gate_offset is not None else 0,
                 'alias': '',
+                'port_by_path': port_by_path or '',
+                'port_by_id': port_by_id or '',
                 'properties': {}
             }
         else:
@@ -142,6 +152,11 @@ class AceDeviceMapper:
             self.device_map[device_id]['last_seen'] = int(time.time())
             if current_gate_offset is not None:
                 self.device_map[device_id]['last_gate_offset'] = current_gate_offset
+            # Update stable paths if provided
+            if port_by_path is not None:
+                self.device_map[device_id]['port_by_path'] = port_by_path
+            if port_by_id is not None:
+                self.device_map[device_id]['port_by_id'] = port_by_id
 
     def get_device_properties(self, device_id):
         """Get properties for a device"""
@@ -242,3 +257,40 @@ class AceDeviceMapper:
             dict: Dictionary mapping alias -> device_id for all aliases
         """
         return self.alias_to_id.copy()
+
+    def get_preferred_port(self, device_id):
+        """
+        Get the preferred port for connecting to a device.
+
+        Preference order:
+        1. by-path (most stable, survives port reordering)
+        2. by-id (stable if device has serial number)
+        3. Regular port (fallback, may change across reboots)
+
+        Args:
+            device_id: Device ID to get port for
+
+        Returns:
+            str: Preferred port path, or None if device not found
+        """
+        info = self.device_map.get(device_id)
+        if not info:
+            return None
+
+        # Prefer by-path (most stable)
+        port_by_path = info.get('port_by_path')
+        if port_by_path:
+            logging.debug(f"ACE Mapper: Using by-path for {device_id}: {port_by_path}")
+            return port_by_path
+
+        # Fallback to by-id
+        port_by_id = info.get('port_by_id')
+        if port_by_id:
+            logging.debug(f"ACE Mapper: Using by-id for {device_id}: {port_by_id}")
+            return port_by_id
+
+        # Last resort: regular port
+        port = info.get('port')
+        if port:
+            logging.debug(f"ACE Mapper: Using regular port for {device_id}: {port}")
+        return port

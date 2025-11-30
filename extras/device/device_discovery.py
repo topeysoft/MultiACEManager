@@ -11,6 +11,8 @@ import time
 import logging
 import hashlib
 import re
+import os
+import glob
 
 from ..protocol.constants import (
     PROTOCOL_HEAD_BYTES,
@@ -28,6 +30,73 @@ class AceDeviceDiscovery:
     ACE_PID = 0x018A  # ACE product ID
     ACE_MANUFACTURER = "GDMicroelectronics"
     ACE_PRODUCT_NAME = "ACE"
+
+    @staticmethod
+    def find_by_path_for_device(tty_device):
+        """
+        Find /dev/serial/by-path symlink for a tty device.
+
+        This provides stable device paths that don't change across reboots,
+        unlike /dev/ttyACM* which can change order.
+
+        Args:
+            tty_device: Device path like /dev/ttyACM0
+
+        Returns:
+            str: Path like /dev/serial/by-path/platform-...-usb-0:1.3:1.0
+            None: If no by-path symlink found or not on Linux
+        """
+        try:
+            # Only available on Linux
+            if not os.path.exists('/dev/serial/by-path'):
+                return None
+
+            # Get the real path of the tty device
+            real_tty = os.path.realpath(tty_device)
+
+            # Search all by-path symlinks
+            by_path_pattern = "/dev/serial/by-path/*"
+            for path in glob.glob(by_path_pattern):
+                if os.path.realpath(path) == real_tty:
+                    return path
+
+            return None
+        except Exception as e:
+            logging.debug(f"ACE: Could not resolve by-path for {tty_device}: {e}")
+            return None
+
+    @staticmethod
+    def find_by_id_for_device(tty_device):
+        """
+        Find /dev/serial/by-id symlink for a tty device.
+
+        Provides stable device identification based on USB device serial number.
+
+        Args:
+            tty_device: Device path like /dev/ttyACM0
+
+        Returns:
+            str: Path like /dev/serial/by-id/usb-ANYCUBIC_ACE_1-if00
+            None: If no by-id symlink found or not on Linux
+        """
+        try:
+            # Only available on Linux
+            if not os.path.exists('/dev/serial/by-id'):
+                return None
+
+            # Get the real path of the tty device
+            real_tty = os.path.realpath(tty_device)
+
+            # Search all by-id symlinks
+            by_id_pattern = "/dev/serial/by-id/*"
+            for path in glob.glob(by_id_pattern):
+                if os.path.realpath(path) == real_tty:
+                    return path
+
+            return None
+        except Exception as e:
+            logging.debug(f"ACE: Could not resolve by-id for {tty_device}: {e}")
+            return None
 
     @staticmethod
     def sanitize_device_id(device_id):
@@ -75,8 +144,15 @@ class AceDeviceDiscovery:
             # Method 1: VID/PID matching (most reliable)
             if port.vid == AceDeviceDiscovery.ACE_VID:
                 logging.info(f"    ✓ Matched by VID (0x{AceDeviceDiscovery.ACE_VID:04X})")
+
+                # Find stable symlink paths
+                by_path = AceDeviceDiscovery.find_by_path_for_device(port.device)
+                by_id = AceDeviceDiscovery.find_by_id_for_device(port.device)
+
                 device_info = {
                     'port': port.device,
+                    'port_by_path': by_path,  # Stable /dev/serial/by-path/... symlink
+                    'port_by_id': by_id,      # Stable /dev/serial/by-id/... symlink
                     'hwid': port.hwid,
                     'serial_number': port.serial_number,
                     'manufacturer': port.manufacturer,
@@ -86,6 +162,13 @@ class AceDeviceDiscovery:
                     'location': port.location,  # USB hub location for stable ordering
                     'usb_location': port.location
                 }
+
+                # Log stable paths if found
+                if by_path:
+                    logging.info(f"    by-path: {by_path}")
+                if by_id:
+                    logging.info(f"    by-id: {by_id}")
+
                 # Generate device_id
                 device_info['device_id'] = AceDeviceDiscovery._generate_device_id(device_info)
                 ace_devices.append(device_info)
@@ -93,8 +176,15 @@ class AceDeviceDiscovery:
             elif (port.manufacturer and AceDeviceDiscovery.ACE_MANUFACTURER.upper() in str(port.manufacturer).upper()) or \
                  (port.product and AceDeviceDiscovery.ACE_PRODUCT_NAME.upper() in str(port.product).upper()):
                 logging.info(f"    ✓ Matched by manufacturer/product string")
+
+                # Find stable symlink paths
+                by_path = AceDeviceDiscovery.find_by_path_for_device(port.device)
+                by_id = AceDeviceDiscovery.find_by_id_for_device(port.device)
+
                 device_info = {
                     'port': port.device,
+                    'port_by_path': by_path,  # Stable /dev/serial/by-path/... symlink
+                    'port_by_id': by_id,      # Stable /dev/serial/by-id/... symlink
                     'hwid': port.hwid,
                     'serial_number': port.serial_number,
                     'manufacturer': port.manufacturer,
@@ -104,6 +194,13 @@ class AceDeviceDiscovery:
                     'location': port.location,
                     'usb_location': port.location
                 }
+
+                # Log stable paths if found
+                if by_path:
+                    logging.info(f"    by-path: {by_path}")
+                if by_id:
+                    logging.info(f"    by-id: {by_id}")
+
                 # Generate device_id
                 device_info['device_id'] = AceDeviceDiscovery._generate_device_id(device_info)
                 ace_devices.append(device_info)
@@ -167,10 +264,21 @@ class AceDeviceDiscovery:
                         result['usb_location'] = usb_location
                     device_id = AceDeviceDiscovery._generate_device_id(result)
 
+                    # Find stable symlink paths
+                    by_path = AceDeviceDiscovery.find_by_path_for_device(port)
+                    by_id = AceDeviceDiscovery.find_by_id_for_device(port)
+
                     logging.info(f"ACE Probe: ✓ Successfully verified ACE device '{device_id}' at {port}")
+                    if by_path:
+                        logging.info(f"ACE Probe: by-path: {by_path}")
+                    if by_id:
+                        logging.info(f"ACE Probe: by-id: {by_id}")
+
                     ser.close()
                     return {
                         'device_id': device_id,
+                        'port_by_path': by_path,
+                        'port_by_id': by_id,
                         'model': result.get('model', 'Unknown'),
                         'firmware': result.get('firmware', 'Unknown'),
                         'serial_number': result.get('serial_number', None),
