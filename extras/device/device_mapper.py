@@ -233,3 +233,12 @@ class AceDeviceMapper:
         """Get display name for device (alias if set, otherwise device_id)"""
         alias = self.get_alias(device_id)
         return alias if alias else device_id
+
+    def get_all_aliases(self):
+        """
+        Get all defined aliases.
+
+        Returns:
+            dict: Dictionary mapping alias -> device_id for all aliases
+        """
+        return self.alias_to_id.copy()

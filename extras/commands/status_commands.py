@@ -54,23 +54,52 @@ class StatusCommands:
 
     def cmd_ACE_GET_STATUS(self, gcmd):
         """
-        ACE_GET_STATUS [DEVICE=<n>] [VERBOSE=<0|1>]
+        ACE_GET_STATUS [DEVICE=<device_id_or_alias_or_index>] [VERBOSE=<0|1>]
 
         Display ACE system status.
 
         Options:
-            DEVICE - Show details for specific device only (0-3)
+            DEVICE - Show details for specific device only
+                     Can be: device_id (hub_1_port_2), alias (ACE1), or index (0-3)
             VERBOSE - Show detailed gate information (default: 0)
 
         Examples:
-            ACE_GET_STATUS              # Show summary
-            ACE_GET_STATUS VERBOSE=1    # Show detailed info
-            ACE_GET_STATUS DEVICE=0     # Show device 0 only
+            ACE_GET_STATUS                    # Show summary
+            ACE_GET_STATUS VERBOSE=1          # Show detailed info
+            ACE_GET_STATUS DEVICE=0           # Show device 0 by index
+            ACE_GET_STATUS DEVICE=ACE1        # Show device by alias
+            ACE_GET_STATUS DEVICE=hub_1_port_2  # Show device by ID
         """
-        device_filter = gcmd.get_int('DEVICE', None)
+        device_param = gcmd.get('DEVICE', None)
         verbose = gcmd.get_int('VERBOSE', 0)
 
         status = self.device_manager.get_aggregated_status()
+
+        # Resolve device filter (supports index, device_id, or alias)
+        device_filter_index = None
+        if device_param is not None:
+            # Try parsing as integer index first
+            try:
+                device_filter_index = int(device_param)
+                if device_filter_index < 0 or device_filter_index >= status["num_devices"]:
+                    raise gcmd.error(f'Invalid device index (valid: 0-{status["num_devices"]-1})')
+            except ValueError:
+                # Not an integer, treat as device_id or alias
+                if hasattr(self.device_manager, 'device_mapper'):
+                    device_id = self.device_manager.device_mapper.resolve_device_id(device_param)
+                    if not device_id:
+                        raise gcmd.error(f'Device "{device_param}" not found')
+
+                    # Find index of this device in status
+                    for i, dev in enumerate(status['devices']):
+                        if dev.get('device_id') == device_id:
+                            device_filter_index = i
+                            break
+
+                    if device_filter_index is None:
+                        raise gcmd.error(f'Device "{device_param}" not connected')
+                else:
+                    raise gcmd.error(f'Unable to resolve device "{device_param}"')
 
         # Header
         self.gcode.respond_info('=== ACE System Status ===')
@@ -87,15 +116,24 @@ class StatusCommands:
         self.gcode.respond_info('\n=== Devices ===')
         for i, dev in enumerate(status['devices']):
             # Skip if filtering by device
-            if device_filter is not None and i != device_filter:
+            if device_filter_index is not None and i != device_filter_index:
                 continue
 
             conn_status = '✓' if dev['connected'] else '✗'
             gates_str = f"{dev['gate_offset']}-{dev['gate_offset']+3}"
-            self.gcode.respond_info(f"{conn_status} {dev['name']}: Gates {gates_str}")
+
+            # Get display name (with alias if available)
+            device_id = dev.get('device_id')
+            display_name = dev["name"]
+            if device_id and hasattr(self.device_manager, 'device_mapper'):
+                alias = self.device_manager.device_mapper.get_alias(device_id)
+                if alias:
+                    display_name = f'{alias} ({dev["name"]})'
+
+            self.gcode.respond_info(f"{conn_status} {display_name}: Gates {gates_str}")
 
             # Show detailed info if verbose or filtering
-            if verbose or device_filter is not None:
+            if verbose or device_filter_index is not None:
                 self._show_device_details(dev)
 
         # Gate configuration (if verbose)

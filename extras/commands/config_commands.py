@@ -6,6 +6,7 @@ Commands:
 - ACE_ENDLESS_SPOOL - Enable/disable endless spool feature
 - ACE_ALIAS - Set friendly alias for a device
 - ACE_UNALIAS - Remove alias from a device
+- ACE_LIST_ALIASES - List all defined device aliases
 """
 
 import logging
@@ -49,25 +50,86 @@ class ConfigCommands:
             'ACE_UNALIAS', self.cmd_ACE_UNALIAS,
             desc='Remove device alias')
 
-        logging.info("ConfigCommands: Registered ACE_GATE_MAP, ACE_ENDLESS_SPOOL, ACE_ALIAS, ACE_UNALIAS")
+        self.gcode.register_command(
+            'ACE_LIST_ALIASES', self.cmd_ACE_LIST_ALIASES,
+            desc='List all device aliases')
+
+        logging.info("ConfigCommands: Registered ACE_GATE_MAP, ACE_ENDLESS_SPOOL, ACE_ALIAS, ACE_UNALIAS, ACE_LIST_ALIASES")
 
     def cmd_ACE_GATE_MAP(self, gcmd):
         """
-        ACE_GATE_MAP GATE=<n> [COLOR=<hex>] [TYPE=<material>] [TEMP=<temp>]
+        ACE_GATE_MAP GATE=<n> [DEVICE=<device_id_or_alias>] [COLOR=<hex>] [TYPE=<material>] [TEMP=<temp>]
 
         Configure gate properties.
 
+        Parameters:
+            GATE - Gate number (0-3 if DEVICE specified, else global 0-15)
+            DEVICE - (Optional) Device ID, alias, or index to scope GATE to
+            COLOR - (Optional) Hex color code (e.g., FF0000 for red)
+            TYPE - (Optional) Material type (e.g., PLA, PETG, ABS)
+            TEMP - (Optional) Temperature in Celsius
+
         Examples:
+            # Global gate number (legacy, backward compatible)
             ACE_GATE_MAP GATE=0 COLOR=FF0000 TYPE=PLA TEMP=210
-            ACE_GATE_MAP GATE=1 COLOR=00FF00 TYPE=PETG TEMP=240
+            ACE_GATE_MAP GATE=5 COLOR=00FF00 TYPE=PETG TEMP=240
+
+            # Device-relative gate (using alias)
+            ACE_GATE_MAP DEVICE=ACE1 GATE=0 COLOR=FF0000 TYPE=PLA TEMP=210
+            ACE_GATE_MAP DEVICE=top_left GATE=1 COLOR=00FF00 TYPE=PETG TEMP=240
+
+            # Device-relative gate (using device_id)
+            ACE_GATE_MAP DEVICE=hub_1_port_2 GATE=0 COLOR=0000FF TYPE=ABS TEMP=250
         """
-        gate = gcmd.get_int('GATE')
+        device_param = gcmd.get('DEVICE', None)
+        gate_param = gcmd.get_int('GATE')
         color = gcmd.get('COLOR', None)
         material_type = gcmd.get('TYPE', None)
         temp = gcmd.get_int('TEMP', None)
 
-        if gate < 0 or gate >= self.device_manager.total_gates:
-            raise gcmd.error(f'Invalid gate (valid: 0-{self.device_manager.total_gates-1})')
+        # Calculate global gate number
+        if device_param is not None:
+            # Device-relative gate
+            status = self.device_manager.get_aggregated_status()
+
+            # Resolve device (supports index, device_id, or alias)
+            device_index = None
+            try:
+                device_index = int(device_param)
+                if device_index < 0 or device_index >= status["num_devices"]:
+                    raise gcmd.error(f'Invalid device index (valid: 0-{status["num_devices"]-1})')
+            except ValueError:
+                # Not an integer, treat as device_id or alias
+                if hasattr(self.device_manager, 'device_mapper'):
+                    device_id = self.device_manager.device_mapper.resolve_device_id(device_param)
+                    if not device_id:
+                        raise gcmd.error(f'Device "{device_param}" not found')
+
+                    # Find index of this device
+                    for i, dev in enumerate(status['devices']):
+                        if dev.get('device_id') == device_id:
+                            device_index = i
+                            break
+
+                    if device_index is None:
+                        raise gcmd.error(f'Device "{device_param}" not connected')
+                else:
+                    raise gcmd.error(f'Unable to resolve device "{device_param}"')
+
+            # Validate relative gate number (0-3 per device)
+            if gate_param < 0 or gate_param > 3:
+                raise gcmd.error(f'Invalid gate for device (valid: 0-3, got {gate_param})')
+
+            # Calculate global gate
+            device_info = status['devices'][device_index]
+            gate = device_info['gate_offset'] + gate_param
+
+            self.gcode.respond_info(f'ACE: Configuring gate {gate_param} on device {device_param} (global gate {gate})')
+        else:
+            # Global gate number (legacy behavior)
+            gate = gate_param
+            if gate < 0 or gate >= self.device_manager.total_gates:
+                raise gcmd.error(f'Invalid gate (valid: 0-{self.device_manager.total_gates-1})')
 
         # Update gate color
         if color:
@@ -229,3 +291,68 @@ class ConfigCommands:
             self.gcode.respond_info(f'ACE: Removed alias "{old_alias}" from device {device_id}')
         else:
             raise gcmd.error('Failed to remove alias')
+
+    def cmd_ACE_LIST_ALIASES(self, gcmd):
+        """
+        ACE_LIST_ALIASES
+
+        List all defined device aliases with their device IDs and connection status.
+
+        Shows:
+        - Alias name
+        - Corresponding device ID
+        - Connection status (connected/disconnected)
+        - Gate range (for connected devices)
+
+        Example output:
+            === Device Aliases ===
+
+            ACE1 → hub_1_port_2 (✓ Connected, Gates 0-3)
+            top_left → hub_1_port_3 (✓ Connected, Gates 4-7)
+            filament_tower → hub_1_port_4 (⊗ Disconnected)
+
+            Total: 3 aliases defined
+        """
+        # Get device mapper
+        device_mapper = self.device_manager.device_mapper
+
+        # Get all aliases
+        aliases = device_mapper.get_all_aliases()
+
+        if not aliases:
+            self.gcode.respond_info('ACE: No device aliases defined')
+            self.gcode.respond_info('')
+            self.gcode.respond_info('Set an alias with: ACE_ALIAS DEVICE=hub_1_port_2 NAME=ACE1')
+            return
+
+        # Get current device status
+        status = self.device_manager.get_aggregated_status()
+        connected_devices = {dev.get('device_id'): dev for dev in status['devices'] if dev.get('device_id')}
+
+        self.gcode.respond_info('=' * 70)
+        self.gcode.respond_info('Device Aliases')
+        self.gcode.respond_info('=' * 70)
+        self.gcode.respond_info('')
+
+        # Sort aliases alphabetically for consistent display
+        for alias in sorted(aliases.keys()):
+            device_id = aliases[alias]
+
+            # Check if device is connected
+            if device_id in connected_devices:
+                dev_info = connected_devices[device_id]
+                conn_symbol = '✓'
+                gate_range = f"Gates {dev_info['gate_offset']}-{dev_info['gate_offset']+3}"
+                status_str = f'{conn_symbol} Connected, {gate_range}'
+            else:
+                # Device is known but not connected
+                conn_symbol = '⊗'
+                status_str = f'{conn_symbol} Disconnected'
+
+            # Format: alias → device_id (status)
+            self.gcode.respond_info(f'  {alias:20s} → {device_id:20s} ({status_str})')
+
+        self.gcode.respond_info('')
+        self.gcode.respond_info('=' * 70)
+        self.gcode.respond_info(f'Total: {len(aliases)} alias{"es" if len(aliases) != 1 else ""} defined')
+        self.gcode.respond_info('=' * 70)
