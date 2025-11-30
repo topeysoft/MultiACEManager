@@ -249,7 +249,7 @@ class StatusCommands:
                     dev_info['device_id'],
                     dev_info['port'],  # by-path
                     dev_info.get('usb_location'),
-                    dev_info['gate_offset'),
+                    dev_info['gate_offset'],
                     dev_info.get('port_tty')  # ttyACM reference
                 )
             self.device_manager.device_mapper.save()
