@@ -99,52 +99,71 @@ link_extension()
     mkdir -p "${KLIPPER_HOME}/klippy/extras/ace/protocol"
     echo "[OK]"
 
-    ln -sf "${SRCDIR}/extras/protocol/__init__.py" "${KLIPPER_HOME}/klippy/extras/ace/protocol/__init__.py"
-    ln -sf "${SRCDIR}/extras/protocol/constants.py" "${KLIPPER_HOME}/klippy/extras/ace/protocol/constants.py"
-    ln -sf "${SRCDIR}/extras/protocol/packet.py" "${KLIPPER_HOME}/klippy/extras/ace/protocol/packet.py"
-    echo -n "  - Linked protocol/*.py (3 files)... "
-    echo "[OK]"
+    echo -n "  - Linking protocol/*.py files... "
+    protocol_count=0
+    for file in "${SRCDIR}/extras/protocol"/*.py; do
+        filename=$(basename "$file")
+        ln -sf "$file" "${KLIPPER_HOME}/klippy/extras/ace/protocol/$filename"
+        protocol_count=$((protocol_count + 1))
+    done
+    echo "($protocol_count files) [OK]"
 
     # Link device package
     echo -n "  - Creating ace/device directory... "
     mkdir -p "${KLIPPER_HOME}/klippy/extras/ace/device"
     echo "[OK]"
 
-    ln -sf "${SRCDIR}/extras/device/__init__.py" "${KLIPPER_HOME}/klippy/extras/ace/device/__init__.py"
-    ln -sf "${SRCDIR}/extras/device/ace_device.py" "${KLIPPER_HOME}/klippy/extras/ace/device/ace_device.py"
-    ln -sf "${SRCDIR}/extras/device/device_manager.py" "${KLIPPER_HOME}/klippy/extras/ace/device/device_manager.py"
-    ln -sf "${SRCDIR}/extras/device/device_discovery.py" "${KLIPPER_HOME}/klippy/extras/ace/device/device_discovery.py"
-    ln -sf "${SRCDIR}/extras/device/device_mapper.py" "${KLIPPER_HOME}/klippy/extras/ace/device/device_mapper.py"
-    echo -n "  - Linked device/*.py (5 files)... "
-    echo "[OK]"
+    echo -n "  - Linking device/*.py files... "
+    device_count=0
+    for file in "${SRCDIR}/extras/device"/*.py; do
+        filename=$(basename "$file")
+        ln -sf "$file" "${KLIPPER_HOME}/klippy/extras/ace/device/$filename"
+        device_count=$((device_count + 1))
+    done
+    echo "($device_count files) [OK]"
 
     # Link sensors package
     echo -n "  - Creating ace/sensors directory... "
     mkdir -p "${KLIPPER_HOME}/klippy/extras/ace/sensors"
     echo "[OK]"
 
-    ln -sf "${SRCDIR}/extras/sensors/__init__.py" "${KLIPPER_HOME}/klippy/extras/ace/sensors/__init__.py"
-    ln -sf "${SRCDIR}/extras/sensors/runout_helper.py" "${KLIPPER_HOME}/klippy/extras/ace/sensors/runout_helper.py"
-    echo -n "  - Linked sensors/*.py (2 files)... "
-    echo "[OK]"
+    echo -n "  - Linking sensors/*.py files... "
+    sensors_count=0
+    for file in "${SRCDIR}/extras/sensors"/*.py; do
+        filename=$(basename "$file")
+        ln -sf "$file" "${KLIPPER_HOME}/klippy/extras/ace/sensors/$filename"
+        sensors_count=$((sensors_count + 1))
+    done
+    echo "($sensors_count files) [OK]"
 
     # Link commands package
     echo -n "  - Creating ace/commands directory... "
     mkdir -p "${KLIPPER_HOME}/klippy/extras/ace/commands"
     echo "[OK]"
 
-    ln -sf "${SRCDIR}/extras/commands/__init__.py" "${KLIPPER_HOME}/klippy/extras/ace/commands/__init__.py"
-    ln -sf "${SRCDIR}/extras/commands/tool_commands.py" "${KLIPPER_HOME}/klippy/extras/ace/commands/tool_commands.py"
-    ln -sf "${SRCDIR}/extras/commands/config_commands.py" "${KLIPPER_HOME}/klippy/extras/ace/commands/config_commands.py"
-    ln -sf "${SRCDIR}/extras/commands/status_commands.py" "${KLIPPER_HOME}/klippy/extras/ace/commands/status_commands.py"
-    echo -n "  - Linked commands/*.py (4 files)... "
-    echo "[OK]"
+    echo -n "  - Linking commands/*.py files... "
+    commands_count=0
+    for file in "${SRCDIR}/extras/commands"/*.py; do
+        filename=$(basename "$file")
+        ln -sf "$file" "${KLIPPER_HOME}/klippy/extras/ace/commands/$filename"
+        commands_count=$((commands_count + 1))
+    done
+    echo "($commands_count files) [OK]"
+
+    # Calculate total files (core files + all package files)
+    total_files=$((3 + protocol_count + device_count + sensors_count + commands_count))
 
     echo ""
     echo "================================================"
     echo "ACE Modular Architecture Installed!"
     echo "================================================"
-    echo "  Total: 18 modular files"
+    echo "  Total: $total_files modular files"
+    echo "    - Core: 3 files"
+    echo "    - Protocol: $protocol_count files"
+    echo "    - Device: $device_count files"
+    echo "    - Sensors: $sensors_count files"
+    echo "    - Commands: $commands_count files"
+    echo ""
     echo "  Entry: ace/__init__.py:load_config()"
     echo "  Architecture: AceController → AceDeviceManager → AceDevice"
     echo ""
@@ -446,7 +465,7 @@ if [ "$UNINSTALL" -ne 1 ]; then
     copy_config
     install_moonraker_component
     add_updater
-    setup_device_aliases
+    # setup_device_aliases  # Skipped - can be done later with ACE_ALIAS commands
 
     echo ""
     echo "========================================="
