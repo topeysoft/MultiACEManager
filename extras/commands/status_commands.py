@@ -340,20 +340,24 @@ class StatusCommands:
 
     def cmd_ACE_SCAN_DEVICES(self, gcmd):
         """
-        ACE_SCAN_DEVICES [APPLY=<0|1>]
+        ACE_SCAN_DEVICES [APPLY=<0|1>] [VERBOSE=<0|1>]
 
         Scan USB ports for ACE devices and display results.
 
         Options:
             APPLY - If set to 1, apply discovered devices and restart connections (default: 0)
+            VERBOSE - If set to 1, show detailed device information (default: 0)
 
         WARNING: This command performs blocking USB I/O and may take several seconds.
         Using APPLY=1 will disconnect and reconnect all devices.
         """
         apply_changes = gcmd.get_int('APPLY', 0)
+        verbose = gcmd.get_int('VERBOSE', 0)
 
-        self.gcode.respond_info('Scanning for ACE devices...')
-        self.gcode.respond_info('(This may take a few seconds...)')
+        # Only show progress messages if verbose
+        if verbose:
+            self.gcode.respond_info('Scanning for ACE devices...')
+            self.gcode.respond_info('(This may take a few seconds...)')
 
         try:
             discovered = AceDeviceDiscovery.find_ace_devices()
@@ -362,22 +366,28 @@ class StatusCommands:
                 self.gcode.respond_info('No ACE devices found')
                 return
 
-            self.gcode.respond_info(f'Found {len(discovered)} ACE device(s):')
-            for i, dev in enumerate(discovered):
-                self.gcode.respond_info(f'\nDevice {i+1}:')
-                self.gcode.respond_info(f'  Port: {dev["port"]}')
-                self.gcode.respond_info(f'  Device ID: {dev["device_id"]}')
-                if dev.get('usb_location'):
-                    self.gcode.respond_info(f'  USB Location: {dev["usb_location"]}')
-                if dev.get('serial_number'):
-                    self.gcode.respond_info(f'  Serial: {dev["serial_number"]}')
+            # Summary (always shown)
+            self.gcode.respond_info(f'Found {len(discovered)} ACE device(s)')
+
+            # Detailed info (only if verbose)
+            if verbose:
+                for i, dev in enumerate(discovered):
+                    self.gcode.respond_info(f'\nDevice {i+1}:')
+                    self.gcode.respond_info(f'  Port: {dev["port"]}')
+                    self.gcode.respond_info(f'  Device ID: {dev["device_id"]}')
+                    if dev.get('usb_location'):
+                        self.gcode.respond_info(f'  USB Location: {dev["usb_location"]}')
+                    if dev.get('serial_number'):
+                        self.gcode.respond_info(f'  Serial: {dev["serial_number"]}')
 
             # Apply changes if requested
             if apply_changes:
-                self.gcode.respond_info('\nApplying device configuration...')
+                if verbose:
+                    self.gcode.respond_info('\nApplying device configuration...')
                 self._apply_discovered_devices(discovered)
                 self.gcode.respond_info('Device configuration applied successfully!')
-                self.gcode.respond_info('Devices will reconnect automatically.')
+                if verbose:
+                    self.gcode.respond_info('Devices will reconnect automatically.')
 
         except Exception as e:
             logging.error(f'ACE_SCAN_DEVICES error: {e}')
