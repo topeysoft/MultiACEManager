@@ -9,7 +9,6 @@ Commands:
 
 import logging
 
-
 class DryerCommands:
     """
     Dryer control commands.
