@@ -20,7 +20,6 @@ from ..protocol.constants import (
     CONNECT_RETRY_BACKOFF,
     READER_POLL_INTERVAL,
     WRITER_POLL_INTERVAL,
-    CONNECTION_DEBOUNCE_TIME,
     REQUEST_TIMEOUT,
     MAX_REQUEST_ID,
     GATES_PER_ACE
@@ -70,11 +69,7 @@ class AceDevice:
         # Hardware state
         self._serial = None
         self._connected = False
-        self._stable_connected = False  # Debounced connection state for UI
-        self._connection_state_timestamp = 0.0  # When connection state last changed
-        self._lock = threading.Lock()
-        self._request_in_flight = False
-        self._pending_request_id: Optional[int] = None
+        self.lock = False  # Simple boolean lock like reference implementation
         self.send_time = None
         self.read_buffer = bytearray()
 
@@ -169,14 +164,11 @@ class AceDevice:
             if self._serial.is_open:
                 # Reset state for new connection
                 self._connected = True
-                self._connection_state_timestamp = self.reactor.monotonic()  # Track when state changed
                 self._request_id = 0
                 self._connection_retry_count = 0
                 self._connection_retry_backoff = 1.0
                 self._consecutive_write_errors = 0
-                with self._lock:
-                    self._request_in_flight = False
-                    self._pending_request_id = None
+                self.lock = False
                 self.read_buffer = bytearray()
 
                 logging.info(f'AceDevice: Successfully connected to {self.serial_id}')
@@ -198,8 +190,6 @@ class AceDevice:
 
         except serial.serialutil.SerialException as e:
             self._serial = None
-            if self._connected:  # Only update timestamp if state actually changed
-                self._connection_state_timestamp = self.reactor.monotonic()
             self._connected = False
             self._connection_retry_count += 1
 
@@ -248,9 +238,8 @@ class AceDevice:
             logging.error(f"AceDevice: Error closing serial port: {e}")
         finally:
             self._serial = None
-            if self._connected:  # Only update timestamp if state actually changed
-                self._connection_state_timestamp = self.reactor.monotonic()
             self._connected = False
+            self.lock = False
 
         try:
             if hasattr(self, 'reader_timer'):
@@ -261,9 +250,7 @@ class AceDevice:
             logging.error(f"AceDevice: Error unregistering timers: {e}")
 
         # Reset state
-        with self._lock:
-            self._request_in_flight = False
-            self._pending_request_id = None
+        self.lock = False
         self.read_buffer = bytearray()
 
     def _get_next_request_id(self) -> int:
@@ -273,65 +260,35 @@ class AceDevice:
             self._request_id = 0
         return self._request_id
 
-    def _update_stable_connection_state(self, eventtime: float) -> None:
-        """
-        Update the stable (debounced) connection state.
-
-        Only updates _stable_connected if the current _connected state has been
-        stable for at least CONNECTION_DEBOUNCE_TIME seconds.
-        """
-        time_in_current_state = eventtime - self._connection_state_timestamp
-
-        # If connection state has been stable long enough, update stable state
-        if time_in_current_state >= CONNECTION_DEBOUNCE_TIME:
-            if self._stable_connected != self._connected:
-                self._stable_connected = self._connected
-                state_str = "connected" if self._stable_connected else "disconnected"
-                logging.info(f"AceDevice: Stable connection state changed to {state_str} for {self.serial_id}")
-
     def _reader(self, eventtime):
         """Read and process responses from ACE device"""
-        # Update stable connection state for UI
-        self._update_stable_connection_state(eventtime)
-
-        # Check for request timeout
-        with self._lock:
-            if self._request_in_flight and self.send_time and (self.reactor.monotonic() - self.send_time) > REQUEST_TIMEOUT:
-                self._request_in_flight = False
-                self._pending_request_id = None
-                self.read_buffer = bytearray()
-                logging.warning(f"AceDevice: Request timeout after {REQUEST_TIMEOUT}s")
+        # Check for request timeout (match reference implementation)
+        if self.lock and (self.reactor.monotonic() - self.send_time) > REQUEST_TIMEOUT:
+            self.lock = False
+            self.read_buffer = bytearray()
+            logging.warning(f"AceDevice: Request timeout after {REQUEST_TIMEOUT}s")
 
         try:
-            with self._lock:
-                should_read = self._request_in_flight
-
-            if should_read and self._serial.in_waiting:
+            if self.lock and self._serial.in_waiting:
                 raw_bytes = self._serial.read(size=self._serial.in_waiting)
             else:
                 raw_bytes = bytearray()
-        except serial.SerialException as e:
-            logging.error(f"AceDevice: Communication error: {e}")
-            self._serial_disconnect()
-            self.connect_timer = self.reactor.register_timer(self._connect, self.reactor.NOW)
-            return self.reactor.NEVER
         except Exception as e:
             logging.error(f"AceDevice: Unable to communicate: {e}")
-            with self._lock:
-                self._request_in_flight = False
-                self._pending_request_id = None
+            self.lock = False
             self._serial_disconnect()
             self.connect_timer = self.reactor.register_timer(self._connect, self.reactor.NOW)
             return self.reactor.NEVER
 
         if len(raw_bytes):
             # Use packet finder from protocol module
-            self.read_buffer += raw_bytes
-            packet, self.read_buffer = AcePacket.find_packet_in_buffer(self.read_buffer)
+            text_buffer = self.read_buffer + raw_bytes
+            packet, self.read_buffer = AcePacket.find_packet_in_buffer(text_buffer)
 
             if packet:
                 buffer = packet
             else:
+                self.read_buffer = text_buffer
                 return eventtime + READER_POLL_INTERVAL
         else:
             return eventtime + READER_POLL_INTERVAL
@@ -340,9 +297,6 @@ class AceDevice:
         response, error = AcePacket.decode(buffer)
 
         if error:
-            with self._lock:
-                self._request_in_flight = False
-                self._pending_request_id = None
             logging.warning(f"AceDevice: Packet decode error: {error}")
             return eventtime + READER_POLL_INTERVAL
 
@@ -350,33 +304,21 @@ class AceDevice:
         try:
             request_id = response.get('id')
 
-            with self._lock:
-                if request_id in self._callback_map:
-                    callback = self._callback_map.pop(request_id)
-                    self._request_in_flight = False
-                    self._pending_request_id = None
-                    # Execute callback outside lock to prevent deadlock
-                    callback(response)
-                else:
-                    logging.warning(f"AceDevice: Received response for unknown request ID {request_id}")
+            if request_id in self._callback_map:
+                callback = self._callback_map.pop(request_id)
+                self.lock = False
+                # Execute callback
+                callback(response)
+            else:
+                logging.warning(f"AceDevice: Received response for unknown request ID {request_id}")
         except Exception as e:
             logging.error(f"AceDevice: Error processing response: {e}")
-            with self._lock:
-                self._request_in_flight = False
-                self._pending_request_id = None
+            self.lock = False
 
         return eventtime + READER_POLL_INTERVAL
 
     def _writer(self, eventtime):
         """Send requests to ACE device and poll status"""
-        # Update stable connection state for UI
-        self._update_stable_connection_state(eventtime)
-
-        # Check connection state first
-        if not self._connected or self._serial is None or not self._serial.is_open:
-            logging.debug(f"AceDevice: Writer skipping - device not connected")
-            return eventtime + WRITER_POLL_INTERVAL
-
         try:
             def status_callback(response):
                 """Update internal state from status response"""
@@ -390,59 +332,31 @@ class AceDevice:
                             self.gate_status = ['empty'] * self.num_gates
                             logging.info(f'AceDevice: Detected {self.num_gates} gates')
                     self.gate_status = [data['status'] for data in self._info.get('slots', [])]
-                    # Reset error counter on successful status poll to prevent false disconnections
-                    self._consecutive_write_errors = 0
 
-            with self._lock:
-                can_send = not self._request_in_flight
-
-            if can_send:
+            if not self.lock:
                 # Check for queued user requests first
-                task = None
-                try:
-                    task = self._queue.get_nowait()
-                except queue.Empty:
-                    pass
-
-                if task is not None:
-                    request_id = self._get_next_request_id()
-                    with self._lock:
+                if not self._queue.empty():
+                    task = self._queue.get()
+                    if task is not None:
+                        request_id = self._get_next_request_id()
                         self._callback_map[request_id] = task[1]
-                        self._request_in_flight = True
-                        self._pending_request_id = request_id
-                    task[0]['id'] = request_id
-                    self._send_request(task[0])
-                    self.send_time = self.reactor.monotonic()
+                        task[0]['id'] = request_id
+                        self._send_request(task[0])
                 else:
-                    # Only poll status if no user requests pending
+                    # Poll status if no user requests pending
                     request_id = self._get_next_request_id()
-                    with self._lock:
-                        self._callback_map[request_id] = status_callback
-                        self._request_in_flight = True
-                        self._pending_request_id = request_id
+                    self._callback_map[request_id] = status_callback
                     self._send_request({"id": request_id, "method": "get_status"})
-                    self.send_time = self.reactor.monotonic()
+
+                self.send_time = eventtime
+                self.lock = True
 
         except Exception as e:
             logging.error(f'AceDevice writer error: {e}\n{traceback.format_exc()}')
-            with self._lock:
-                self._request_in_flight = False
-                self._pending_request_id = None
-
-            # Track consecutive errors for I/O issues
-            self._consecutive_write_errors += 1
-
-            # Only disconnect after multiple consecutive errors
-            if self._consecutive_write_errors >= self._max_consecutive_errors:
-                logging.error(f'AceDevice: {self._consecutive_write_errors} consecutive write errors, disconnecting...')
-                self._io_error_cooldown = True
-                self._serial_disconnect()
-                self.connect_timer = self.reactor.register_timer(self._connect, self.reactor.NOW)
-                return self.reactor.NEVER
-            else:
-                logging.warning(f'AceDevice: Write error {self._consecutive_write_errors}/{self._max_consecutive_errors}, continuing...')
-                # Continue trying on next iteration
-                return eventtime + WRITER_POLL_INTERVAL
+            self.lock = False
+            self._serial_disconnect()
+            self.connect_timer = self.reactor.register_timer(self._connect, self.reactor.NOW)
+            return self.reactor.NEVER
 
         return eventtime + WRITER_POLL_INTERVAL
 
@@ -638,7 +552,7 @@ class AceDevice:
         Get current device status (synchronous).
 
         Returns:
-            Device status dictionary with debounced connection state
+            Device status dictionary
         """
         return {
             'status': self._info['status'],
@@ -649,5 +563,5 @@ class AceDevice:
             'slots': self._info.get('slots', []),
             'device_id': self.device_id,
             'port': self.serial_id,
-            'connected': self._stable_connected  # Use debounced state to prevent UI flickering
+            'connected': self._connected
         }

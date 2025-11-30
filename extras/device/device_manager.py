@@ -246,13 +246,13 @@ class AceDeviceManager:
                 'port': dev['port'],
                 'gate_offset': dev['gate_offset'],
                 'gates': list(range(dev['gate_offset'], dev['gate_offset'] + GATES_PER_ACE)),
-                'connected': dev['instance']._stable_connected,  # Use debounced state to prevent UI flickering
-                'connection_status': 'connected' if dev['instance']._stable_connected else 'disconnected',
+                'connected': dev['instance']._connected,
+                'connection_status': 'connected' if dev['instance']._connected else 'disconnected',
                 'model': dev['instance']._info.get('model', 'ACE Pro'),
                 'firmware': dev['instance']._info.get('firmware', 'Unknown'),
                 'health': {
                     'avg_response_time_ms': 0,  # TODO: Track actual response times
-                    'error_count': dev['instance']._consecutive_write_errors,
+                    'error_count': 0,  # Removed _consecutive_write_errors tracking
                     'uptime': 0,  # TODO: Calculate from connection time
                     'temperature': dev['instance']._info.get('temp', 0),
                 },
