@@ -61,7 +61,7 @@ class AceManager:
         """
         GET /server/ace/devices
 
-        Returns detailed information about all ACE devices.
+        Returns lightweight device list (connection info only, no full status).
 
         Response:
         {
@@ -74,17 +74,12 @@ class AceManager:
                     "firmware": "v2.1.0",
                     "connection_status": "connected",
                     "gate_offset": 0,
-                    "num_gates": 4,
-                    "gates": [0, 1, 2, 3],
-                    "health": {
-                        "avg_response_time_ms": 45,
-                        "error_count": 0,
-                        "uptime": 3600
-                    }
+                    "gates": [0, 1, 2, 3]
                 },
                 ...
             ],
             "total_gates": 8,
+            "num_devices": 2,
             "auto_detect_enabled": true
         }
         """
@@ -100,12 +95,26 @@ class AceManager:
                 }
 
             ace_data = result['ace']
+            full_devices = ace_data.get('devices', [])
 
-            # Build response with device information
-            devices = ace_data.get('devices', [])
+            # Extract lightweight device info (remove full status objects)
+            lightweight_devices = [
+                {
+                    'name': dev['name'],
+                    'device_id': dev['device_id'],
+                    'port': dev['port'],
+                    'gate_offset': dev['gate_offset'],
+                    'gates': dev['gates'],
+                    'connected': dev['connected'],
+                    'connection_status': dev['connection_status'],
+                    'model': dev['model'],
+                    'firmware': dev['firmware']
+                }
+                for dev in full_devices
+            ]
 
             return {
-                'devices': devices,
+                'devices': lightweight_devices,
                 'total_gates': ace_data.get('total_gates', 0),
                 'num_devices': ace_data.get('num_devices', 0),
                 'auto_detect_enabled': True
@@ -244,18 +253,27 @@ class AceManager:
         """
         GET /server/ace/status
 
-        Returns the current ACE Manager status including all gates and devices.
+        Returns the current ACE Manager status with gate arrays and device references.
 
         Response:
         {
-            "status": "ready",
-            "temp": 25,
-            "num_gates": 8,
+            "total_gates": 8,
             "num_devices": 2,
+            "selected_gate": 1,
+            "active_gate": [...],
             "gate_color": [...],
             "gate_material": [...],
-            "active_gate": [...],
-            "devices": [...]
+            "gate_temp": [...],
+            "spool_id": [...],
+            "endless_spool": false,
+            "device_status": [
+                {
+                    "device_id": "...",
+                    "temp": 23,
+                    "dryer_status": {...},
+                    "slots": [...]
+                }
+            ]
         }
         """
         try:
@@ -267,8 +285,33 @@ class AceManager:
                     'error': 'ACE Manager not found in Klipper'
                 }
 
-            # Return the full ACE status
-            return result['ace']
+            ace_data = result['ace']
+            full_devices = ace_data.get('devices', [])
+
+            # Extract only per-device status (not static info)
+            device_status = [
+                {
+                    'device_id': dev['device_id'],
+                    'temp': dev['status']['temp'],
+                    'dryer_status': dev['status']['dryer_status'],
+                    'slots': dev['status']['slots']
+                }
+                for dev in full_devices
+            ]
+
+            # Return status with device references instead of full objects
+            return {
+                'total_gates': ace_data.get('total_gates', 0),
+                'num_devices': ace_data.get('num_devices', 0),
+                'selected_gate': ace_data.get('selected_gate', -1),
+                'active_gate': ace_data.get('active_gate', []),
+                'gate_color': ace_data.get('gate_color', []),
+                'gate_material': ace_data.get('gate_material', []),
+                'gate_temp': ace_data.get('gate_temp', []),
+                'spool_id': ace_data.get('spool_id', []),
+                'endless_spool': ace_data.get('endless_spool', False),
+                'device_status': device_status
+            }
 
         except Exception as e:
             logging.exception(f"Error getting ACE status: {e}")

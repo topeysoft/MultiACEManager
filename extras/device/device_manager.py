@@ -232,12 +232,34 @@ class AceDeviceManager:
 
         raise ValueError(f"Cannot route gate {global_gate}")
 
-    def get_all_devices(self) -> List[Dict]:
+    def get_device_info_lightweight(self) -> List[Dict]:
         """
-        Get list of all device info.
+        Get lightweight device info (connection details only, no status).
 
         Returns:
-            List of device info dictionaries
+            List of device info dictionaries without status data
+        """
+        return [
+            {
+                'name': dev['name'],
+                'device_id': dev['device_id'],
+                'port': dev['port'],
+                'gate_offset': dev['gate_offset'],
+                'gates': list(range(dev['gate_offset'], dev['gate_offset'] + GATES_PER_ACE)),
+                'connected': dev['instance']._connected,
+                'connection_status': 'connected' if dev['instance']._connected else 'disconnected',
+                'model': dev['instance']._info.get('model', 'ACE Pro'),
+                'firmware': dev['instance']._info.get('firmware', 'Unknown')
+            }
+            for dev in self.ace_devices
+        ]
+
+    def get_all_devices(self) -> List[Dict]:
+        """
+        Get list of all device info with full status.
+
+        Returns:
+            List of device info dictionaries including full status
         """
         return [
             {
