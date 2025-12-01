@@ -54,7 +54,15 @@ class ToolCommands:
             'ACE_SET_GATE', self.cmd_ACE_SET_GATE,
             desc='Set selected gate without loading')
 
-        logging.info("ToolCommands: Registered ACE_CHANGE_TOOL, ACE_FEED, ACE_RETRACT, ACE_CLEAR_SELECTION, ACE_SET_GATE")
+        self.gcode.register_command(
+            'ACE_ENABLE_FEED_ASSIST', self.cmd_ACE_ENABLE_FEED_ASSIST,
+            desc='Enable feed assist for gate')
+
+        self.gcode.register_command(
+            'ACE_DISABLE_FEED_ASSIST', self.cmd_ACE_DISABLE_FEED_ASSIST,
+            desc='Disable feed assist for gate')
+
+        logging.info("ToolCommands: Registered ACE_CHANGE_TOOL, ACE_FEED, ACE_RETRACT, ACE_CLEAR_SELECTION, ACE_SET_GATE, ACE_ENABLE_FEED_ASSIST, ACE_DISABLE_FEED_ASSIST")
 
     def cmd_ACE_CHANGE_TOOL(self, gcmd):
         """
@@ -288,6 +296,45 @@ class ToolCommands:
         else:
             self.gcode.respond_info(f'ACE: Selected gate set to {gate} (was: {old_tool})')
             logging.info(f'ToolCommands: Set gate selection: {old_tool} → {gate}')
+
+    def cmd_ACE_ENABLE_FEED_ASSIST(self, gcmd):
+        """
+        ACE_ENABLE_FEED_ASSIST INDEX=<n>
+
+        Enable feed assist for specified gate.
+        Feed assist helps pull filament through the bowden tube during loading.
+
+        Args:
+            INDEX: Gate number (0 to total_gates-1)
+        """
+        gate = gcmd.get_int('INDEX')
+
+        if gate < 0 or gate >= self.device_manager.total_gates:
+            raise gcmd.error(f'Invalid gate (valid: 0-{self.device_manager.total_gates-1})')
+
+        self._enable_feed_assist(gate)
+        self.gcode.respond_info(f'ACE: Feed assist enabled for gate {gate}')
+
+    def cmd_ACE_DISABLE_FEED_ASSIST(self, gcmd):
+        """
+        ACE_DISABLE_FEED_ASSIST [INDEX=<n>]
+
+        Disable feed assist for specified gate.
+        If INDEX not provided, uses currently selected gate.
+
+        Args:
+            INDEX: Gate number (optional, defaults to current_tool)
+        """
+        gate = gcmd.get_int('INDEX', self.controller.current_tool)
+
+        if gate < 0:
+            raise gcmd.error('No gate specified and no tool currently selected')
+
+        if gate >= self.device_manager.total_gates:
+            raise gcmd.error(f'Invalid gate (valid: 0-{self.device_manager.total_gates-1})')
+
+        self._disable_feed_assist(gate)
+        self.gcode.respond_info(f'ACE: Feed assist disabled for gate {gate}')
 
     # ========================================================================
     # Helper Methods for Tool Change Sequences
