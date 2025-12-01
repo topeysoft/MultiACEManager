@@ -626,6 +626,9 @@ class ToolCommands:
             def callback(response):
                 if 'code' in response and response['code'] != 0:
                     self.gcode.respond_info(f"ACE Error: {response.get('msg', 'Unknown error')}")
+                else:
+                    # Update controller state on success
+                    self.controller.gate_feed_assist[tool] = True
 
             device.start_feed_assist(local_gate, callback)
             logging.info(f'ToolCommands: Enabled feed assist for tool {tool}')
@@ -646,6 +649,9 @@ class ToolCommands:
             def callback(response):
                 if 'code' in response and response['code'] != 0:
                     self.gcode.respond_info(f"ACE Error: {response.get('msg', 'Unknown error')}")
+                else:
+                    # Update controller state on success
+                    self.controller.gate_feed_assist[tool] = False
 
             device.stop_feed_assist(local_gate, callback)
             logging.info(f'ToolCommands: Disabled feed assist for tool {tool}')

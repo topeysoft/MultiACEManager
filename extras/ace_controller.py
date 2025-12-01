@@ -107,6 +107,10 @@ class AceController:
         self.current_tool = -1
         self.toolhead = None
 
+        # Per-gate feed assist state (tracked per gate)
+        # Initialize based on total_gates from device manager
+        self.gate_feed_assist = [False] * self.device_manager.total_gates
+
         # Command modules
         self.tool_commands = None
         self.config_commands = None
@@ -309,5 +313,6 @@ class AceController:
             'gate_temp': gate_temps[:self.device_manager.total_gates],
             'spool_id': list(range(1, self.device_manager.total_gates + 1)),
             'endless_spool': bool(self.save_variables.allVariables.get('ace_endless_spool', False)),
+            'gate_feed_assist': self.gate_feed_assist[:self.device_manager.total_gates],
             'devices': device_status['devices']
         }
