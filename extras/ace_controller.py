@@ -65,6 +65,7 @@ class AceController:
         self.toolhead_sensor_to_nozzle_length = config.getint('toolhead_sensor_to_nozzle', 0)
         self.poop_macros = config.get('poop_macros', '_POOP')
         self.cut_macros = config.get('cut_macros', '_CUT_TIP')
+        self.error_macros = config.get('error_macros', None)
 
         # Connection and device configuration
         self.baud = config.getint('baud', 115200)

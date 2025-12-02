@@ -492,10 +492,16 @@ class ToolCommands:
                 if device.is_ready():
                     sensor_state = self._check_sensor(self.controller.extruder_sensor)
                     logging.error(f'ToolCommands: Feed completed but sensor not triggered. Sensor state: {sensor_state}, elapsed: {elapsed:.2f}s, feed_length: {feed_length}mm')
-                    self.gcode.respond_info(f'ACE Error: Load failed - extruder sensor not triggered (fed {feed_length}mm in {elapsed:.1f}s). Check sensor wiring and filament path.')
-                    # Call error handler instead of crashing
-                    if hasattr(self.controller, 'error_macros') and self.controller.error_macros:
-                        self.gcode.run_script_from_command(self.controller.error_macros)
+
+                    # Call error handler macro if configured
+                    if self.controller.error_macros:
+                        try:
+                            error_cmd = f"{self.controller.error_macros} TOOL={tool} ERROR='EXTRUDER_SENSOR_NOT_TRIGGERED' FEED_LENGTH={feed_length} ELAPSED={elapsed:.2f} SENSOR_STATE={sensor_state}"
+                            logging.info(f'ToolCommands: Calling error macro: {error_cmd}')
+                            self.gcode.run_script_from_command(error_cmd)
+                        except Exception as e:
+                            logging.error(f'ToolCommands: Error macro failed: {e}')
+
                     raise AceException(f'ACE Error: Load failed - extruder sensor not triggered (fed {feed_length}mm in {elapsed:.1f}s)')
 
                 # Check for timeout
