@@ -458,6 +458,11 @@ class ToolCommands:
             # Wait for device to be ready
             device.wait_ready()
 
+            # Check gate status before feeding
+            device_info = device.get_status()
+            gate_status = device_info.get('slots', [{}])[local_gate] if local_gate < len(device_info.get('slots', [])) else {}
+            logging.info(f'ToolCommands: Gate {local_gate} status before feed: {gate_status}')
+
             # Start feeding with extra length (we'll stop when sensor triggers)
             # Feed length + extra distance to ensure we reach the sensor
             feed_length = self.controller.toolchange_feed_length + self.controller.toolhead_homing_max
@@ -494,9 +499,15 @@ class ToolCommands:
                 # Check if device finished (sensor never triggered - error)
                 if device.is_ready():
                     sensor_state = self._check_sensor(self.controller.extruder_sensor)
-                    logging.error(f'ToolCommands: Feed completed but sensor not triggered. Sensor state: {sensor_state}, elapsed: {elapsed:.2f}s, feed_length: {feed_length}mm')
+                    device_info = device.get_status()
+                    gate_status = device_info.get('slots', [{}])[local_gate] if local_gate < len(device_info.get('slots', [])) else {}
+                    logging.error(f'ToolCommands: Feed completed but sensor not triggered.')
+                    logging.error(f'  Sensor state: {sensor_state}, elapsed: {elapsed:.2f}s, feed_length: {feed_length}mm')
+                    logging.error(f'  Gate {local_gate} status after feed: {gate_status}')
+                    logging.error(f'  Device status: {device_info.get("status")}')
 
                     # Call error handler macro if configured
+                    error_msg = f'ACE Error: Load failed - extruder sensor not triggered (fed {feed_length}mm in {elapsed:.1f}s)'
                     if self.controller.error_macros:
                         try:
                             error_cmd = f"{self.controller.error_macros} TOOL={tool} ERROR='EXTRUDER_SENSOR_NOT_TRIGGERED' FEED_LENGTH={feed_length} ELAPSED={elapsed:.2f} SENSOR_STATE={sensor_state}"
@@ -504,13 +515,28 @@ class ToolCommands:
                             self.gcode.run_script_from_command(error_cmd)
                         except Exception as e:
                             logging.error(f'ToolCommands: Error macro failed: {e}')
-
-                    raise AceException(f'ACE Error: Load failed - extruder sensor not triggered (fed {feed_length}mm in {elapsed:.1f}s)')
+                        # Return after calling error macro - don't shutdown
+                        self.gcode.respond_info(error_msg)
+                        return
+                    else:
+                        # No error macro configured - raise exception (will cause shutdown)
+                        raise AceException(error_msg)
 
                 # Check for timeout
                 if elapsed > timeout:
                     self._stop_feeding(tool)
-                    raise AceException(f'ACE Error: Load timeout - extruder sensor not triggered after {timeout}s')
+                    error_msg = f'ACE Error: Load timeout - extruder sensor not triggered after {timeout}s'
+                    logging.error(f'ToolCommands: {error_msg}')
+                    if self.controller.error_macros:
+                        try:
+                            error_cmd = f"{self.controller.error_macros} TOOL={tool} ERROR='TIMEOUT' FEED_LENGTH={feed_length} ELAPSED={elapsed:.2f} SENSOR_STATE={sensor_state}"
+                            self.gcode.run_script_from_command(error_cmd)
+                        except Exception as e:
+                            logging.error(f'ToolCommands: Error macro failed: {e}')
+                        self.gcode.respond_info(error_msg)
+                        return
+                    else:
+                        raise AceException(error_msg)
 
                 # Small delay before checking again (10ms polling)
                 self.dwell(delay=0.01)
