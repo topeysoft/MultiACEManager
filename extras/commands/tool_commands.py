@@ -464,11 +464,14 @@ class ToolCommands:
             feed_speed = self.controller.feed_speed
 
             def feed_callback(response):
+                logging.info(f'ToolCommands: Feed callback received: {response}')
                 if 'code' in response and response['code'] != 0:
                     self.gcode.respond_info(f"ACE Error: {response.get('msg', 'Unknown error')}")
 
             # Start the feed operation (non-blocking)
+            logging.info(f'ToolCommands: Starting feed - gate={local_gate}, length={feed_length}mm, speed={feed_speed}mm/s')
             device.feed(local_gate, feed_length, feed_speed, feed_callback)
+            logging.info(f'ToolCommands: Feed command sent, device ready state: {device.is_ready()}')
 
             # Track when we started and when to slow down
             start_time = self.reactor.monotonic()

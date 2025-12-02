@@ -323,7 +323,11 @@ class AceDevice:
             def status_callback(response):
                 """Update internal state from status response"""
                 if response is not None:
-                    self._info = response.get('result', {})
+                    new_info = response.get('result', {})
+                    # Log status changes for debugging
+                    if self._info.get('status') != new_info.get('status'):
+                        logging.info(f"AceDevice {self.device_id}: Status changed from '{self._info.get('status')}' to '{new_info.get('status')}'")
+                    self._info = new_info
                     # Dynamically detect number of gates from response
                     if 'slots' in self._info and len(self._info['slots']) > 0:
                         detected_gates = len(self._info['slots'])
