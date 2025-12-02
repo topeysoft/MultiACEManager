@@ -477,6 +477,9 @@ class ToolCommands:
 
             # Monitor sensor in a loop
             timeout = 60.0  # 60 second timeout
+            sensor_state = self._check_sensor(self.controller.extruder_sensor)
+            logging.info(f'ToolCommands: Starting sensor monitoring. Initial state: {sensor_state}, sensor: {self.controller.extruder_sensor}')
+
             while not self._check_sensor(self.controller.extruder_sensor):
                 # Check if we should slow down for accuracy
                 elapsed = self.reactor.monotonic() - start_time
@@ -487,7 +490,13 @@ class ToolCommands:
 
                 # Check if device finished (sensor never triggered - error)
                 if device.is_ready():
-                    raise AceException(f'ACE Error: Load failed - extruder sensor not triggered')
+                    sensor_state = self._check_sensor(self.controller.extruder_sensor)
+                    logging.error(f'ToolCommands: Feed completed but sensor not triggered. Sensor state: {sensor_state}, elapsed: {elapsed:.2f}s, feed_length: {feed_length}mm')
+                    self.gcode.respond_info(f'ACE Error: Load failed - extruder sensor not triggered (fed {feed_length}mm in {elapsed:.1f}s). Check sensor wiring and filament path.')
+                    # Call error handler instead of crashing
+                    if hasattr(self.controller, 'error_macros') and self.controller.error_macros:
+                        self.gcode.run_script_from_command(self.controller.error_macros)
+                    raise AceException(f'ACE Error: Load failed - extruder sensor not triggered (fed {feed_length}mm in {elapsed:.1f}s)')
 
                 # Check for timeout
                 if elapsed > timeout:
