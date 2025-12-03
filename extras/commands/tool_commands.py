@@ -62,7 +62,15 @@ class ToolCommands:
             'ACE_DISABLE_FEED_ASSIST', self.cmd_ACE_DISABLE_FEED_ASSIST,
             desc='Disable feed assist for gate')
 
-        logging.info("ToolCommands: Registered ACE_CHANGE_TOOL, ACE_FEED, ACE_RETRACT, ACE_CLEAR_SELECTION, ACE_SET_GATE, ACE_ENABLE_FEED_ASSIST, ACE_DISABLE_FEED_ASSIST")
+        self.gcode.register_command(
+            'ACE_RETRY_FEED', self.cmd_ACE_RETRY_FEED,
+            desc='Retry failed feed operation after user intervention')
+
+        self.gcode.register_command(
+            'ACE_CANCEL_FEED', self.cmd_ACE_CANCEL_FEED,
+            desc='Cancel failed feed operation and abort tool change')
+
+        logging.info("ToolCommands: Registered ACE_CHANGE_TOOL, ACE_FEED, ACE_RETRACT, ACE_CLEAR_SELECTION, ACE_SET_GATE, ACE_ENABLE_FEED_ASSIST, ACE_DISABLE_FEED_ASSIST, ACE_RETRY_FEED, ACE_CANCEL_FEED")
 
     def cmd_ACE_CHANGE_TOOL(self, gcmd):
         """
@@ -336,6 +344,64 @@ class ToolCommands:
         self._disable_feed_assist(gate)
         self.gcode.respond_info(f'ACE: Feed assist disabled for gate {gate}')
 
+    def cmd_ACE_RETRY_FEED(self, gcmd):
+        """
+        ACE_RETRY_FEED
+
+        Retry a failed feed operation after user has cleared the obstruction.
+        This command is used after a feed timeout has paused the print.
+        """
+        if not hasattr(self.controller, 'feed_retry_state') or self.controller.feed_retry_state is None:
+            raise gcmd.error('No feed retry pending. This command is only available after a feed timeout.')
+
+        retry_state = self.controller.feed_retry_state
+        tool = retry_state['tool']
+        retry_count = retry_state['retry_count']
+        prev_distance = retry_state['distance_fed']
+
+        self.gcode.respond_info(f'ACE: Retrying feed for tool {tool} (attempt {retry_count + 1}/3, previously fed {prev_distance}mm)')
+        logging.info(f'ToolCommands: User initiated feed retry for tool {tool}, retry {retry_count}/2')
+
+        # Clear retry state
+        self.controller.feed_retry_state = None
+
+        # Resume print first
+        self.gcode.run_script_from_command("RESUME")
+
+        # Retry the feed operation
+        try:
+            self._feed_to_toolhead(tool, retry_count)
+            self.gcode.respond_info(f'ACE: Feed retry successful for tool {tool}')
+        except AceException as e:
+            # If it fails again, it will either prompt for another retry or raise the exception
+            logging.error(f'ToolCommands: Feed retry failed: {e}')
+            raise
+
+    def cmd_ACE_CANCEL_FEED(self, gcmd):
+        """
+        ACE_CANCEL_FEED
+
+        Cancel a failed feed operation and abort the tool change.
+        This will cancel the print job.
+        """
+        if not hasattr(self.controller, 'feed_retry_state') or self.controller.feed_retry_state is None:
+            raise gcmd.error('No feed retry pending. This command is only available after a feed timeout.')
+
+        retry_state = self.controller.feed_retry_state
+        tool = retry_state['tool']
+        distance_fed = retry_state['distance_fed']
+
+        self.gcode.respond_info(f'ACE: Canceling feed operation for tool {tool} (fed {distance_fed}mm before timeout)')
+        logging.info(f'ToolCommands: User canceled feed operation for tool {tool}')
+
+        # Clear retry state
+        self.controller.feed_retry_state = None
+
+        # Cancel the print
+        self.gcode.run_script_from_command("CANCEL_PRINT")
+
+        raise AceException(f'ACE Error: Feed operation canceled by user after timeout (fed {distance_fed}mm)')
+
     # ========================================================================
     # Helper Methods for Tool Change Sequences
     # ========================================================================
@@ -554,13 +620,14 @@ class ToolCommands:
             logging.error(f'ToolCommands: Failed to feed to extruder: {e}')
             raise
 
-    def _feed_to_toolhead(self, tool):
+    def _feed_to_toolhead(self, tool, retry_count=0):
         """
         Feed filament from extruder sensor to toolhead sensor using extruder motor.
         Monitors toolhead sensor and stops when triggered.
 
         Args:
             tool: Tool (gate) number for feed assist
+            retry_count: Current retry attempt (internal use)
         """
         if self.controller.toolhead_sensor is None:
             logging.warning('ToolCommands: No toolhead sensor configured, using fixed distance')
@@ -577,6 +644,7 @@ class ToolCommands:
         # Incrementally move extruder while monitoring toolhead sensor
         timeout = 60.0  # 60 second timeout
         start_time = self.reactor.monotonic()
+        distance_fed = 0.0
 
         logging.info('ToolCommands: Feeding to toolhead sensor with incremental moves')
 
@@ -585,10 +653,18 @@ class ToolCommands:
             elapsed = self.reactor.monotonic() - start_time
             if elapsed > timeout:
                 self._disable_feed_assist(tool)
-                raise AceException(f'ACE Error: Load timeout - toolhead sensor not triggered after {timeout}s')
+                logging.error(f'ToolCommands: Load timeout after {elapsed:.1f}s - fed {distance_fed}mm without triggering toolhead sensor')
+
+                # Offer retry with user intervention
+                if retry_count < 2:  # Allow up to 2 retries (3 total attempts)
+                    self._handle_feed_timeout_retry(tool, distance_fed, retry_count)
+                    return
+                else:
+                    raise AceException(f'ACE Error: Load timeout - toolhead sensor not triggered after {timeout}s (fed {distance_fed}mm). Maximum retries exceeded.')
 
             # Move 1mm at a time
             self._extruder_move(1.0, self.controller.extruder_move_speed)
+            distance_fed += 1.0
 
             # Small delay before next move (10ms polling)
             self.dwell(delay=0.01)
@@ -598,6 +674,40 @@ class ToolCommands:
         self._disable_feed_assist(tool)
 
         logging.info('ToolCommands: Successfully fed to toolhead sensor')
+
+    def _handle_feed_timeout_retry(self, tool, distance_fed, retry_count):
+        """
+        Handle feed timeout with user intervention prompt and retry logic.
+
+        Args:
+            tool: Tool (gate) number
+            distance_fed: Distance fed before timeout
+            retry_count: Current retry attempt
+        """
+        retry_num = retry_count + 1
+
+        # Pause the print
+        self.gcode.run_script_from_command("PAUSE")
+
+        # Send detailed message to user
+        msg = (f"ACE Load Error: Toolhead sensor not triggered after feeding {distance_fed}mm.\n"
+               f"Possible causes:\n"
+               f"  - Filament jam or tangle\n"
+               f"  - Extruder skipping steps\n"
+               f"  - Debris blocking sensor\n"
+               f"  - Bowden tube disconnected\n\n"
+               f"Check the filament path and clear any obstructions.\n"
+               f"Use ACE_RETRY_FEED to retry, or ACE_CANCEL_FEED to abort.")
+
+        self.gcode.respond_info(msg)
+        logging.warning(f'ToolCommands: Feed timeout - waiting for user intervention (retry {retry_num}/2)')
+
+        # Store retry state for resume command
+        self.controller.feed_retry_state = {
+            'tool': tool,
+            'retry_count': retry_num,
+            'distance_fed': distance_fed
+        }
 
     def _feed_to_nozzle(self):
         """

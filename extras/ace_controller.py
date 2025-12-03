@@ -112,6 +112,9 @@ class AceController:
         # Initialize based on total_gates from device manager
         self.gate_feed_assist = [False] * self.device_manager.total_gates
 
+        # Feed retry state (for handling feed timeout retries)
+        self.feed_retry_state = None
+
         # Command modules
         self.tool_commands = None
         self.config_commands = None
