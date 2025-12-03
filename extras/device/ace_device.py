@@ -87,6 +87,10 @@ class AceDevice:
         self._io_error_cooldown = False
         self._max_consecutive_errors = 3
 
+        # Activity tracking for adaptive polling (Klipper best practice)
+        self._last_command_time = 0.0
+        self._printer = None  # Will be set to access print_stats
+
         # Device info
         self.num_gates = GATES_PER_ACE
         self._info = {
@@ -129,6 +133,11 @@ class AceDevice:
         self._connection_retry_count = 0
         self._connection_retry_backoff = 1.0
         self._queue = queue.Queue()
+
+        # Get printer object for adaptive polling state detection
+        if hasattr(self.reactor, 'printer'):
+            self._printer = self.reactor.printer
+
         self.connect_timer = self.reactor.register_timer(self._connect, self.reactor.NOW)
 
     def disconnect(self):
@@ -289,16 +298,16 @@ class AceDevice:
                 buffer = packet
             else:
                 self.read_buffer = text_buffer
-                return eventtime + READER_POLL_INTERVAL
+                return eventtime + min(READER_POLL_INTERVAL, self._get_adaptive_poll_interval())
         else:
-            return eventtime + READER_POLL_INTERVAL
+            return eventtime + min(READER_POLL_INTERVAL, self._get_adaptive_poll_interval())
 
         # Decode packet
         response, error = AcePacket.decode(buffer)
 
         if error:
             logging.warning(f"AceDevice: Packet decode error: {error}")
-            return eventtime + READER_POLL_INTERVAL
+            return eventtime + min(READER_POLL_INTERVAL, self._get_adaptive_poll_interval())
 
         # Process response
         try:
@@ -315,10 +324,10 @@ class AceDevice:
             logging.error(f"AceDevice: Error processing response: {e}")
             self.lock = False
 
-        return eventtime + READER_POLL_INTERVAL
+        return eventtime + min(READER_POLL_INTERVAL, self._get_adaptive_poll_interval())
 
     def _writer(self, eventtime):
-        """Send requests to ACE device and poll status"""
+        """Send requests to ACE device with adaptive polling"""
         try:
             def status_callback(response):
                 """Update internal state from status response"""
@@ -338,7 +347,7 @@ class AceDevice:
                     self.gate_status = [data['status'] for data in self._info.get('slots', [])]
 
             if not self.lock:
-                # Check for queued user requests first
+                # Prioritize queued user requests
                 if not self._queue.empty():
                     task = self._queue.get()
                     if task is not None:
@@ -346,8 +355,9 @@ class AceDevice:
                         self._callback_map[request_id] = task[1]
                         task[0]['id'] = request_id
                         self._send_request(task[0])
+                        self._last_command_time = eventtime  # Track activity
                 else:
-                    # Poll status if no user requests pending
+                    # No user requests - send status poll
                     request_id = self._get_next_request_id()
                     self._callback_map[request_id] = status_callback
                     self._send_request({"id": request_id, "method": "get_status"})
@@ -362,7 +372,8 @@ class AceDevice:
             self.connect_timer = self.reactor.register_timer(self._connect, self.reactor.NOW)
             return self.reactor.NEVER
 
-        return eventtime + WRITER_POLL_INTERVAL
+        # Use adaptive interval based on activity (Klipper best practice)
+        return eventtime + self._get_adaptive_poll_interval()
 
     def _send_request(self, request: Dict[str, Any]) -> None:
         """Send a JSON-RPC request to ACE device with retry logic"""
@@ -427,6 +438,45 @@ class AceDevice:
     def is_ready(self) -> bool:
         """Check if device is ready to accept commands"""
         return self._info['status'] == 'ready'
+
+    def _get_adaptive_poll_interval(self):
+        """
+        Get adaptive polling interval based on activity state.
+        Follows Klipper best practice of varying timer intervals.
+
+        Returns:
+            float: Seconds until next poll
+        """
+        # Fast polling when queue has items
+        if not self._queue.empty():
+            return 0.1  # Check queue frequently when active
+
+        # Check if currently printing
+        is_printing = False
+        if self._printer:
+            try:
+                print_stats = self._printer.lookup_object("print_stats", None)
+                if print_stats:
+                    is_printing = print_stats.state == "printing"
+            except:
+                pass
+
+        # Adaptive intervals based on state
+        now = self.reactor.monotonic()
+        time_since_command = now - self._last_command_time
+
+        if is_printing:
+            # During print: slow polling (status rarely changes mid-print)
+            return 5.0
+        elif time_since_command < 10.0:
+            # Recent activity: medium polling for 10s after last command
+            return 1.0
+        elif self._info['status'] == 'busy':
+            # Device busy: poll more frequently
+            return 1.0
+        else:
+            # Idle: very slow heartbeat (just for disconnect detection)
+            return 30.0
 
     # ========================================================================
     # Simple command API - these just send requests, no orchestration
