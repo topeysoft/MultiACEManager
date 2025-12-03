@@ -268,13 +268,6 @@ uninstall()
         echo "  - ace/ package not found [SKIPPED]"
     fi
 
-    # Remove old standalone ace.py if it exists (from previous installations)
-    if [ -f "${KLIPPER_HOME}/klippy/extras/ace.py" ]; then
-        echo -n "  - Removing old ace.py (if exists from previous install)... "
-        rm -f "${KLIPPER_HOME}/klippy/extras/ace.py"
-        echo "[OK]"
-    fi
-
     # Uninstall Moonraker component
     if [ -f "${MOONRAKER_HOME}/moonraker/components/ace_manager.py" ]; then
         echo -n "  - Removing Moonraker component... "
