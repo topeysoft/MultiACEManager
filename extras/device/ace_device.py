@@ -183,9 +183,8 @@ class AceDevice:
 
                 logging.info(f'AceDevice: Successfully connected to {self.serial_id}')
 
-                # Start communication timers
-                self.writer_timer = self.reactor.register_timer(self._writer, eventtime + READY_WAIT_DELAY)
-                self.reader_timer = self.reactor.register_timer(self._reader, eventtime + READY_WAIT_DELAY)
+                # Note: Timer is now managed by DeviceManager (global single timer)
+                # Device is passive - no per-device timers
 
                 # Request device info
                 self.send_request(
@@ -251,13 +250,7 @@ class AceDevice:
             self._connected = False
             self.lock = False
 
-        try:
-            if hasattr(self, 'reader_timer'):
-                self.reactor.unregister_timer(self.reader_timer)
-            if hasattr(self, 'writer_timer'):
-                self.reactor.unregister_timer(self.writer_timer)
-        except Exception as e:
-            logging.error(f"AceDevice: Error unregistering timers: {e}")
+        # No per-device timer to unregister (managed by DeviceManager)
 
         # Reset state
         self.lock = False
@@ -270,11 +263,21 @@ class AceDevice:
             self._request_id = 0
         return self._request_id
 
-    def _reader(self, eventtime):
+    def process_io(self, eventtime):
         """
-        Read and process responses from ACE device.
-        Uses adaptive polling to prevent 'Timer too close' errors.
+        Process I/O for this device (called by DeviceManager's global timer).
+        Combined read + write operations, no timer scheduling.
         """
+        # First, check for incoming data (reading)
+        self._process_incoming_data(eventtime)
+
+        # Then, send outgoing requests (writing)
+        self._process_outgoing_requests(eventtime)
+
+        # Note: No return value - timer is managed by DeviceManager
+
+    def _process_incoming_data(self, eventtime):
+        """Read and process responses from ACE device"""
         # Check for request timeout (match reference implementation)
         if self.lock and (self.reactor.monotonic() - self.send_time) > REQUEST_TIMEOUT:
             self.lock = False
@@ -291,7 +294,7 @@ class AceDevice:
             self.lock = False
             self._serial_disconnect()
             self.connect_timer = self.reactor.register_timer(self._connect, self.reactor.NOW)
-            return self.reactor.NEVER
+            return  # Just return, timer scheduling handled by _io_handler
 
         if len(raw_bytes):
             # Use packet finder from protocol module
@@ -299,44 +302,30 @@ class AceDevice:
             packet, self.read_buffer = AcePacket.find_packet_in_buffer(text_buffer)
 
             if packet:
-                buffer = packet
-            else:
-                self.read_buffer = text_buffer
-                interval = max(0.2, min(READER_POLL_INTERVAL, self._get_adaptive_poll_interval()))
-                return eventtime + interval
-        else:
-            interval = max(0.2, min(READER_POLL_INTERVAL, self._get_adaptive_poll_interval()))
-            return eventtime + interval
+                # Decode packet
+                response, error = AcePacket.decode(packet)
 
-        # Decode packet
-        response, error = AcePacket.decode(buffer)
+                if error:
+                    logging.warning(f"AceDevice: Packet decode error: {error}")
+                    return
 
-        if error:
-            logging.warning(f"AceDevice: Packet decode error: {error}")
-            interval = max(0.2, min(READER_POLL_INTERVAL, self._get_adaptive_poll_interval()))
-            return eventtime + interval
+                # Process response
+                try:
+                    request_id = response.get('id')
 
-        # Process response
-        try:
-            request_id = response.get('id')
+                    if request_id in self._callback_map:
+                        callback = self._callback_map.pop(request_id)
+                        self.lock = False
+                        # Execute callback
+                        callback(response)
+                    else:
+                        logging.warning(f"AceDevice: Received response for unknown request ID {request_id}")
+                except Exception as e:
+                    logging.error(f"AceDevice: Error processing response: {e}")
+                    self.lock = False
 
-            if request_id in self._callback_map:
-                callback = self._callback_map.pop(request_id)
-                self.lock = False
-                # Execute callback
-                callback(response)
-            else:
-                logging.warning(f"AceDevice: Received response for unknown request ID {request_id}")
-        except Exception as e:
-            logging.error(f"AceDevice: Error processing response: {e}")
-            self.lock = False
-
-        # Use adaptive interval, but enforce minimum to prevent timer conflicts
-        interval = max(0.2, min(READER_POLL_INTERVAL, self._get_adaptive_poll_interval()))
-        return eventtime + interval
-
-    def _writer(self, eventtime):
-        """Send requests to ACE device with adaptive polling"""
+    def _process_outgoing_requests(self, eventtime):
+        """Send requests to ACE device"""
         try:
             def status_callback(response):
                 """Update internal state from status response"""
@@ -379,10 +368,6 @@ class AceDevice:
             self.lock = False
             self._serial_disconnect()
             self.connect_timer = self.reactor.register_timer(self._connect, self.reactor.NOW)
-            return self.reactor.NEVER
-
-        # Use adaptive interval based on activity (Klipper best practice)
-        return eventtime + self._get_adaptive_poll_interval()
 
     def _send_request(self, request: Dict[str, Any]) -> None:
         """Send a JSON-RPC request to ACE device with retry logic"""

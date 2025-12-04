@@ -72,7 +72,12 @@ class AceDeviceManager:
         # Calculate total gates
         self.total_gates = len(self.ace_devices) * GATES_PER_ACE
 
+        # Global I/O timer (single timer for all devices)
+        self.global_io_timer = None
+        self._last_global_interval = None
+
         logging.info(f"AceDeviceManager: Managing {len(self.ace_devices)} devices with {self.total_gates} total gates")
+        logging.info(f"AceDeviceManager: Using single global timer for all devices")
 
     def _setup_auto_detect(self):
         """Auto-detect ACE devices via USB enumeration"""
@@ -199,15 +204,35 @@ class AceDeviceManager:
             logging.info(f"AceDeviceManager: Created device on {port} at gates {gate_offset}-{gate_offset+3}")
 
     def connect_all(self):
-        """Connect to all ACE devices"""
+        """Connect to all ACE devices and start global timer"""
         logging.info("AceDeviceManager: Connecting to all devices...")
         for device in self.ace_devices:
             ace_instance = device['instance']
             ace_instance.connect()
 
+        # Start global I/O timer after all devices connected
+        if self.ace_devices and not self.global_io_timer:
+            from ..protocol.constants import READY_WAIT_DELAY
+            self.global_io_timer = self.reactor.register_timer(
+                self._global_io_handler,
+                self.reactor.monotonic() + READY_WAIT_DELAY
+            )
+            logging.info("AceDeviceManager: Started global I/O timer")
+
     def disconnect_all(self):
-        """Disconnect from all ACE devices"""
+        """Disconnect from all ACE devices and stop global timer"""
         logging.info("AceDeviceManager: Disconnecting from all devices...")
+
+        # Stop global timer
+        if self.global_io_timer:
+            try:
+                self.reactor.unregister_timer(self.global_io_timer)
+                self.global_io_timer = None
+                logging.info("AceDeviceManager: Stopped global I/O timer")
+            except Exception as e:
+                logging.error(f"AceDeviceManager: Error stopping global timer: {e}")
+
+        # Disconnect all devices
         for device in self.ace_devices:
             ace_instance = device['instance']
             ace_instance.disconnect()
@@ -431,3 +456,56 @@ class AceDeviceManager:
             'unchanged': unchanged,
             'gate_offset_map': gate_offset_map
         }
+
+    def _global_io_handler(self, eventtime):
+        """
+        Single global I/O handler for all ACE devices.
+        Polls all devices sequentially, preventing timer conflicts.
+        """
+        try:
+            # Poll each device (sequential, but very fast ~1ms each)
+            for device_info in self.ace_devices:
+                device = device_info['instance']
+                if device._connected:
+                    device.process_io(eventtime)
+
+            # Calculate adaptive interval based on ANY device activity
+            interval = self._get_global_adaptive_interval()
+
+            # Log interval changes
+            if interval != self._last_global_interval:
+                if interval == 30.0:
+                    logging.info(f"AceDeviceManager: All devices IDLE (30s heartbeat)")
+                elif interval <= 0.5:
+                    logging.debug(f"AceDeviceManager: Active devices detected ({interval}s polling)")
+                self._last_global_interval = interval
+
+            return eventtime + interval
+
+        except Exception as e:
+            logging.error(f"AceDeviceManager: Global I/O handler error: {e}")
+            import traceback
+            traceback.print_exc()
+            return eventtime + 5.0  # Failsafe
+
+    def _get_global_adaptive_interval(self):
+        """
+        Get adaptive polling interval based on activity across ALL devices.
+        Returns the fastest interval needed by any device.
+        """
+        try:
+            fastest_interval = 30.0  # Start with slowest (idle)
+
+            for device_info in self.ace_devices:
+                device = device_info['instance']
+                if device._connected:
+                    # Get device's desired interval
+                    device_interval = device._get_adaptive_poll_interval()
+                    fastest_interval = min(fastest_interval, device_interval)
+
+            # Enforce minimum to prevent timer conflicts
+            return max(0.2, fastest_interval)
+
+        except Exception as e:
+            logging.warning(f"AceDeviceManager: Error in global adaptive polling: {e}")
+            return 5.0  # Failsafe
