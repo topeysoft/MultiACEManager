@@ -204,13 +204,15 @@ class AceDeviceManager:
             logging.info(f"AceDeviceManager: Created device on {port} at gates {gate_offset}-{gate_offset+3}")
 
     def connect_all(self):
-        """Connect to all ACE devices and start global timer"""
-        logging.info("AceDeviceManager: Connecting to all devices...")
+        """Connect to all ACE devices and start global timer (non-blocking)"""
+        logging.info("AceDeviceManager: Starting device connections (non-blocking)...")
+
+        # Trigger connection attempts (async via timers)
         for device in self.ace_devices:
             ace_instance = device['instance']
             ace_instance.connect()
 
-        # Start global I/O timer after all devices connected
+        # Start global I/O timer immediately (devices will connect asynchronously)
         if self.ace_devices and not self.global_io_timer:
             from ..protocol.constants import READY_WAIT_DELAY
             self.global_io_timer = self.reactor.register_timer(
@@ -218,6 +220,7 @@ class AceDeviceManager:
                 self.reactor.monotonic() + READY_WAIT_DELAY
             )
             logging.info("AceDeviceManager: Started global I/O timer")
+            logging.info("AceDeviceManager: Klipper startup continuing - devices will connect in background")
 
     def disconnect_all(self):
         """Disconnect from all ACE devices and stop global timer"""

@@ -204,6 +204,9 @@ class AceDevice:
 
             if self._connection_retry_count >= self.connect_retry_max:
                 logging.error(f'AceDevice: Failed to connect to {self.serial_id} after {self.connect_retry_max} attempts')
+                logging.error(f'AceDevice: Device will remain disconnected - Klipper will continue startup')
+                # Don't block Klipper startup - just mark as disconnected
+                self._connected = False
                 return self.reactor.NEVER
 
             # Calculate retry delay with exponential backoff

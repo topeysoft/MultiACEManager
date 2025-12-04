@@ -11,8 +11,8 @@ CRC_INIT_VALUE = 0xFFFF
 # Timing Constants (matched to reference implementation)
 DEFAULT_EVENT_DELAY = 0.1
 READY_WAIT_DELAY = 2.0  # Match reference implementation
-CONNECT_RETRY_DELAY = 1.0
-CONNECT_RETRY_MAX = 10  # Maximum connection retry attempts
+CONNECT_RETRY_DELAY = 0.5  # Reduced from 1.0 for faster startup
+CONNECT_RETRY_MAX = 5  # Reduced from 10 - fail fast, don't block Klipper startup
 CONNECT_RETRY_BACKOFF = 1.5  # Exponential backoff multiplier
 READER_POLL_INTERVAL = 0.5  # Base interval (adaptive timing caps at this value)
 WRITER_POLL_INTERVAL = 2.0  # Fallback only (adaptive timing used in practice)
