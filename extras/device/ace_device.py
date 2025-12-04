@@ -346,6 +346,9 @@ class AceDevice:
                             self.gate_status = ['empty'] * self.num_gates
                             logging.info(f'AceDevice: Detected {self.num_gates} gates')
                     self.gate_status = [data['status'] for data in self._info.get('slots', [])]
+                else:
+                    # Response was None - might indicate communication issue
+                    logging.warning(f"AceDevice {self.device_id}: Received None response in status callback")
 
             if not self.lock:
                 # Prioritize queued user requests

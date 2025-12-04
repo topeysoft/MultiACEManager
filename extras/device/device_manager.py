@@ -467,10 +467,25 @@ class AceDeviceManager:
         """
         try:
             # Poll each device (sequential, but very fast ~1ms each)
+            connected_count = 0
             for device_info in self.ace_devices:
                 device = device_info['instance']
                 if device._connected:
+                    connected_count += 1
                     device.process_io(eventtime)
+
+            # Log connection status periodically
+            if not hasattr(self, '_last_status_log_time'):
+                self._last_status_log_time = 0
+
+            if eventtime - self._last_status_log_time > 30.0:  # Every 30s
+                logging.info(f"AceDeviceManager: {connected_count}/{len(self.ace_devices)} devices connected")
+                for device_info in self.ace_devices:
+                    device = device_info['instance']
+                    status = "CONNECTED" if device._connected else "DISCONNECTED"
+                    device_status = device._info.get('status', 'unknown')
+                    logging.info(f"  {device.device_id}: {status}, status={device_status}")
+                self._last_status_log_time = eventtime
 
             # Calculate adaptive interval based on ANY device activity
             interval = self._get_global_adaptive_interval()
