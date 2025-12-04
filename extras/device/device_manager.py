@@ -58,6 +58,11 @@ class AceDeviceManager:
         if hasattr(logging, log_level_str):
             self.log_level = getattr(logging, log_level_str)
 
+        # Adaptive polling configuration
+        from ..protocol.constants import DEFAULT_ADAPTIVE_POLLING, WRITER_POLL_INTERVAL
+        self.adaptive_polling = config.getboolean('adaptive_polling', DEFAULT_ADAPTIVE_POLLING)
+        self.fixed_poll_interval = config.getfloat('poll_interval', WRITER_POLL_INTERVAL)
+
         # Check configuration method
         serial_ports_str = config.get('serial_ports', None)
         auto_detect = config.getboolean('auto_detect', False)
@@ -78,6 +83,10 @@ class AceDeviceManager:
 
         logging.info(f"AceDeviceManager: Managing {len(self.ace_devices)} devices with {self.total_gates} total gates")
         logging.info(f"AceDeviceManager: Using single global timer for all devices")
+        if self.adaptive_polling:
+            logging.info(f"AceDeviceManager: Adaptive polling ENABLED (0.2s-30s based on activity)")
+        else:
+            logging.info(f"AceDeviceManager: Adaptive polling DISABLED (fixed {self.fixed_poll_interval}s interval)")
 
     def _setup_auto_detect(self):
         """Auto-detect ACE devices via USB enumeration"""
@@ -508,10 +517,15 @@ class AceDeviceManager:
 
     def _get_global_adaptive_interval(self):
         """
-        Get adaptive polling interval based on activity across ALL devices.
-        Returns the fastest interval needed by any device.
+        Get polling interval - either adaptive or fixed based on configuration.
+        Returns the fastest interval needed by any device (if adaptive enabled).
         """
         try:
+            # If adaptive polling disabled, return fixed interval
+            if not self.adaptive_polling:
+                return self.fixed_poll_interval
+
+            # Adaptive polling: find fastest interval needed
             fastest_interval = 30.0  # Start with slowest (idle)
 
             for device_info in self.ace_devices:
@@ -525,5 +539,5 @@ class AceDeviceManager:
             return max(0.2, fastest_interval)
 
         except Exception as e:
-            logging.warning(f"AceDeviceManager: Error in global adaptive polling: {e}")
+            logging.warning(f"AceDeviceManager: Error in polling interval calculation: {e}")
             return 5.0  # Failsafe
