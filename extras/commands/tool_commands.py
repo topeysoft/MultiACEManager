@@ -125,10 +125,10 @@ class ToolCommands:
         """
         Unload filament from specified tool.
 
-        Sequence:
-        1. Small retract from nozzle to prevent oozing
-        2. Tip cutting (while filament still at/near nozzle)
-        3. Retract to extruder sensor (with ACE feed assist)
+        Sequence (matches BunnyACE):
+        1. Disable feed assist for old tool
+        2. Tip cutting (at nozzle)
+        3. Synchronized retract until extruder sensor clears (extruder + ACE together)
         4. Full retract to gate
 
         Args:
@@ -136,13 +136,18 @@ class ToolCommands:
         """
         self.gcode.respond_info(f'ACE: Unloading tool {tool}...')
 
-        # 1. Small retract from nozzle to prevent oozing during cut
-        retract_for_cut = self.controller.toolchange_retract_for_cut
-        if retract_for_cut > 0:
-            self.gcode.respond_info(f'ACE: Retracting {retract_for_cut}mm to prevent oozing')
-            self._extruder_move(-retract_for_cut, self.controller.extruder_move_speed)
+        # 1. Disable feed assist for old tool
+        self._disable_feed_assist(tool)
 
-        # 2. Execute tip cutting (while filament at/near nozzle)
+        # Wait for ACE device to be ready
+        try:
+            device, local_gate = self.device_manager.get_device_for_gate(tool)
+            device.wait_ready()
+        except ValueError as e:
+            logging.error(f'ToolCommands: Failed to get device for tool {tool}: {e}')
+            raise
+
+        # 2. Execute tip cutting (at nozzle position)
         if self.controller.cut_macros:
             self.gcode.respond_info(f'ACE: Executing cut macro: {self.controller.cut_macros}')
             try:
@@ -150,23 +155,30 @@ class ToolCommands:
             except Exception as e:
                 logging.warning(f'ToolCommands: Cut macro failed: {e}')
 
-        # 3. Retract to extruder sensor (with ACE feed assist)
+        # 3. Synchronized retract until extruder sensor clears
+        # Extruder motor pushes back while ACE pulls - work together in 20mm increments
         extruder_has_filament = self._check_sensor(self.controller.extruder_sensor)
         if extruder_has_filament:
-            self.gcode.respond_info('ACE: Retracting to extruder sensor')
-            self._retract_from_toolhead(tool)
+            self.gcode.respond_info('ACE: Retracting to extruder sensor (synchronized)')
+
+            def retract_callback(response):
+                if 'code' in response and response['code'] != 0:
+                    logging.error(f"ACE retract error: {response.get('msg', 'Unknown error')}")
+
+            # Retract in 20mm increments until sensor clears
+            while self._check_sensor(self.controller.extruder_sensor):
+                # Extruder motor pushes back
+                self._extruder_move(-20, self.controller.extruder_move_speed)
+
+                # ACE pulls simultaneously
+                device.retract(local_gate, 20, self.controller.retract_speed, retract_callback)
+                device.wait_ready()
+
+            logging.info('ToolCommands: Extruder sensor cleared')
 
         # 4. Full retract to gate
         self.gcode.respond_info('ACE: Retracting to gate')
         self._retract_to_gate(tool)
-
-        # 5. Execute poop macros if configured (for waste purge)
-        if self.controller.poop_macros:
-            self.gcode.respond_info(f'ACE: Executing poop macro: {self.controller.poop_macros}')
-            try:
-                self.gcode.run_script_from_command(self.controller.poop_macros)
-            except Exception as e:
-                logging.warning(f'ToolCommands: Poop macro failed: {e}')
 
         logging.info(f'ToolCommands: Unload tool {tool} complete')
         self.gcode.respond_info('ACE: Unload complete')
@@ -449,52 +461,6 @@ class ToolCommands:
         if retract_length < 0:
             self._extruder_move(retract_length, self.controller.extruder_move_speed)
 
-    def _retract_from_toolhead(self, tool):
-        """
-        Retract filament from toolhead sensor to extruder sensor.
-        Uses extruder motor to retract while ACE provides gentle pull assist.
-        Monitors extruder sensor and stops when filament clears.
-
-        Args:
-            tool: Tool (gate) number for feed assist
-        """
-        if self.controller.extruder_sensor is None:
-            logging.warning('ToolCommands: No extruder sensor configured, skipping homing retract')
-            return
-
-        # Enable ACE feed assist to help pull filament through extruder sensor
-        self._enable_feed_assist(tool)
-        self.dwell(delay=0.1)  # Let feed assist engage
-
-        # Retract with extruder motor while monitoring sensor
-        max_retract = self.controller.toolhead_homing_max
-        homing_speed = self.controller.toolhead_homing_speed
-
-        # Start extruder retract in small increments, monitoring sensor
-        distance_retracted = 0.0
-        increment = 5.0  # Retract in 5mm increments
-
-        logging.info('ToolCommands: Retracting from toolhead to extruder sensor with feed assist')
-
-        while distance_retracted < max_retract:
-            # Check if sensor has cleared
-            if not self._check_sensor(self.controller.extruder_sensor):
-                logging.info(f'ToolCommands: Extruder sensor cleared after {distance_retracted}mm')
-                break
-
-            # Retract another increment
-            self._extruder_move(-increment, homing_speed)
-            distance_retracted += increment
-            self.dwell(delay=0.05)  # Small delay for sensor to update
-
-        # Disable feed assist
-        self._disable_feed_assist(tool)
-
-        if distance_retracted >= max_retract:
-            logging.warning(f'ToolCommands: Reached max retract ({max_retract}mm) but sensor still triggered')
-        else:
-            logging.info(f'ToolCommands: Successfully retracted {distance_retracted}mm to clear extruder sensor')
-
     def _retract_to_gate(self, tool):
         """
         Retract filament from extruder to gate using ACE device.
@@ -558,8 +524,9 @@ class ToolCommands:
             gate_status = device_info.get('slots', [{}])[local_gate] if local_gate < len(device_info.get('slots', [])) else {}
             logging.info(f'ToolCommands: Gate {local_gate} status before feed: {gate_status}')
 
-            # Start feeding configured bowden length (sensor monitoring will stop when triggered)
-            feed_length = self.controller.toolchange_feed_length
+            # Start feeding bowden length + extra margin (sensor monitoring will stop when triggered)
+            # Extra length ensures we don't run short if bowden slightly longer than configured
+            feed_length = self.controller.toolchange_feed_length + self.controller.toolhead_homing_max
             feed_speed = self.controller.feed_speed
 
             def feed_callback(response):
@@ -642,7 +609,11 @@ class ToolCommands:
             # Wait for device to complete the stop
             device.wait_ready()
 
-            logging.info('ToolCommands: Successfully fed to extruder sensor')
+            # Enable feed assist for subsequent extruder operations
+            # This matches BunnyACE: enable AFTER extruder sensor triggers
+            self._enable_feed_assist(tool)
+
+            logging.info('ToolCommands: Successfully fed to extruder sensor, feed assist enabled')
 
         except ValueError as e:
             logging.error(f'ToolCommands: Failed to feed to extruder: {e}')
@@ -652,6 +623,9 @@ class ToolCommands:
         """
         Feed filament from extruder sensor to toolhead sensor using extruder motor.
         Monitors toolhead sensor and stops when triggered.
+
+        NOTE: Feed assist is already enabled in _feed_to_extruder() and stays ON
+        through entire load sequence (matches BunnyACE).
 
         Args:
             tool: Tool (gate) number for feed assist
@@ -663,23 +637,19 @@ class ToolCommands:
             self._extruder_move(self.controller.toolhead_homing_max, self.controller.extruder_move_speed)
             return
 
-        # Enable feed assist to help pull filament through
-        self._enable_feed_assist(tool)
-
-        # Wait a moment for feed assist to engage
-        self.dwell(delay=0.1)
-
+        # Feed assist already enabled in _feed_to_extruder() - just use it
         # Incrementally move extruder while monitoring toolhead sensor using direct pin queries
         timeout = 60.0  # 60 second timeout
         start_time = self.reactor.monotonic()
         distance_fed = 0.0
 
-        logging.info('ToolCommands: Feeding to toolhead sensor with incremental moves')
+        logging.info('ToolCommands: Feeding to toolhead sensor (with feed assist)')
 
         while not self.controller.query_sensor_pin(self.controller.toolhead_sensor):
             # Check for timeout
             elapsed = self.reactor.monotonic() - start_time
             if elapsed > timeout:
+                # Disable feed assist on error
                 self._disable_feed_assist(tool)
                 logging.error(f'ToolCommands: Load timeout after {elapsed:.1f}s - fed {distance_fed}mm without triggering toolhead sensor')
 
@@ -697,10 +667,8 @@ class ToolCommands:
             # Small delay before next move (10ms polling)
             self.dwell(delay=0.01)
 
-        # Sensor triggered! Disable feed assist
-        logging.info('ToolCommands: Toolhead sensor triggered')
-        self._disable_feed_assist(tool)
-
+        # Sensor triggered! Feed assist stays ON for nozzle feed and poop macro
+        logging.info('ToolCommands: Toolhead sensor triggered (feed assist remains active)')
         logging.info('ToolCommands: Successfully fed to toolhead sensor')
 
     def _handle_feed_timeout_retry(self, tool, distance_fed, retry_count):
