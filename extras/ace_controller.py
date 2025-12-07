@@ -59,6 +59,7 @@ class AceController:
         self.retract_speed = config.getint('retract_speed', 50)
         self.toolchange_retract_length = config.getint('toolchange_retract_length', 100)
         self.toolchange_feed_length = config.getint('toolchange_feed_length', 100)
+        self.toolchange_retract_for_cut = config.getint('toolchange_retract_for_cut', 5)  # Small retract before tip cut to prevent oozing
         self.toolhead_homing_max = config.getint('toolhead_homing_max', 100)
         self.toolhead_homing_speed = config.getint('toolhead_homing_speed', 10)
         self.extruder_move_speed = config.getint('extruder_move_speed', 10)
@@ -110,7 +111,8 @@ class AceController:
 
         # Per-gate feed assist state (tracked per gate)
         # Initialize based on total_gates from device manager
-        self.gate_feed_assist = [False] * self.device_manager.total_gates
+        # Default to True - feed assist enabled by default for all gates
+        self.gate_feed_assist = [True] * self.device_manager.total_gates
 
         # Feed retry state (for handling feed timeout retries)
         self.feed_retry_state = None
@@ -139,6 +141,25 @@ class AceController:
         self.device_manager.connect_all()
 
         logging.info('AceController: Ready')
+
+    def _enable_all_feed_assist(self):
+        """
+        Enable feed assist on all gates after devices are connected.
+        This is called after command registration to ensure tool_commands is available.
+        """
+        if not self.tool_commands:
+            logging.warning('AceController: Cannot enable feed assist - tool_commands not initialized')
+            return
+
+        logging.info('AceController: Enabling feed assist on all gates by default')
+
+        for gate in range(self.device_manager.total_gates):
+            try:
+                self.tool_commands._enable_feed_assist(gate)
+            except Exception as e:
+                logging.warning(f'AceController: Failed to enable feed assist on gate {gate}: {e}')
+
+        logging.info(f'AceController: Feed assist enabled on {self.device_manager.total_gates} gates')
 
     def _handle_disconnect(self):
         """Handle Klipper disconnect event"""
@@ -304,6 +325,20 @@ class AceController:
         self.dryer_commands.register()
 
         logging.info("AceController: All G-code commands registered")
+
+        # Schedule feed assist enablement after devices have time to connect
+        # Use a delayed timer to ensure devices are connected and ready
+        self.reactor.register_callback(self._delayed_feed_assist_enable)
+
+    def _delayed_feed_assist_enable(self, eventtime):
+        """
+        Delayed callback to enable feed assist after device connection.
+        Called a few seconds after startup to allow devices to connect.
+        """
+        # Wait a bit longer for devices to fully connect
+        import time
+        time.sleep(3.0)
+        self._enable_all_feed_assist()
 
     def save_variable(self, variable, value, write=False):
         """Save variable to persistent storage"""

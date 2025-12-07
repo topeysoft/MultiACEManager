@@ -125,20 +125,24 @@ class ToolCommands:
         """
         Unload filament from specified tool.
 
+        Sequence:
+        1. Small retract from nozzle to prevent oozing
+        2. Tip cutting (while filament still at/near nozzle)
+        3. Retract to extruder sensor (with ACE feed assist)
+        4. Full retract to gate
+
         Args:
             tool: Tool (gate) number to unload
         """
         self.gcode.respond_info(f'ACE: Unloading tool {tool}...')
 
-        # 1. Check toolhead sensor state
-        toolhead_has_filament = self._check_sensor(self.controller.toolhead_sensor)
+        # 1. Small retract from nozzle to prevent oozing during cut
+        retract_for_cut = self.controller.toolchange_retract_for_cut
+        if retract_for_cut > 0:
+            self.gcode.respond_info(f'ACE: Retracting {retract_for_cut}mm to prevent oozing')
+            self._extruder_move(-retract_for_cut, self.controller.extruder_move_speed)
 
-        # 2. Retract to toolhead sensor if present
-        if toolhead_has_filament:
-            self.gcode.respond_info('ACE: Retracting from nozzle to toolhead sensor')
-            self._retract_from_nozzle()
-
-        # 3. Execute cut/poop macros if configured
+        # 2. Execute tip cutting (while filament at/near nozzle)
         if self.controller.cut_macros:
             self.gcode.respond_info(f'ACE: Executing cut macro: {self.controller.cut_macros}')
             try:
@@ -146,17 +150,17 @@ class ToolCommands:
             except Exception as e:
                 logging.warning(f'ToolCommands: Cut macro failed: {e}')
 
-        # 4. Retract to extruder sensor
+        # 3. Retract to extruder sensor (with ACE feed assist)
         extruder_has_filament = self._check_sensor(self.controller.extruder_sensor)
         if extruder_has_filament:
-            self.gcode.respond_info('ACE: Retracting from toolhead to extruder sensor')
-            self._retract_from_toolhead()
+            self.gcode.respond_info('ACE: Retracting to extruder sensor')
+            self._retract_from_toolhead(tool)
 
-        # 5. Retract to gate
+        # 4. Full retract to gate
         self.gcode.respond_info('ACE: Retracting to gate')
         self._retract_to_gate(tool)
 
-        # 6. Execute poop macros if configured
+        # 5. Execute poop macros if configured (for waste purge)
         if self.controller.poop_macros:
             self.gcode.respond_info(f'ACE: Executing poop macro: {self.controller.poop_macros}')
             try:
@@ -445,26 +449,51 @@ class ToolCommands:
         if retract_length < 0:
             self._extruder_move(retract_length, self.controller.extruder_move_speed)
 
-    def _retract_from_toolhead(self):
+    def _retract_from_toolhead(self, tool):
         """
-        Retract filament from toolhead sensor to extruder sensor using homing.
+        Retract filament from toolhead sensor to extruder sensor.
+        Uses extruder motor to retract while ACE provides gentle pull assist.
+        Monitors extruder sensor and stops when filament clears.
+
+        Args:
+            tool: Tool (gate) number for feed assist
         """
         if self.controller.extruder_sensor is None:
             logging.warning('ToolCommands: No extruder sensor configured, skipping homing retract')
             return
 
-        # Home to extruder sensor by retracting
+        # Enable ACE feed assist to help pull filament through extruder sensor
+        self._enable_feed_assist(tool)
+        self.dwell(delay=0.1)  # Let feed assist engage
+
+        # Retract with extruder motor while monitoring sensor
         max_retract = self.controller.toolhead_homing_max
         homing_speed = self.controller.toolhead_homing_speed
 
-        # Retract until extruder sensor is not triggered
-        endstop = self.controller.endstops.get('extruder_sensor')
-        if endstop:
-            # Use manual homing approach
-            self._extruder_move(-max_retract, homing_speed)
+        # Start extruder retract in small increments, monitoring sensor
+        distance_retracted = 0.0
+        increment = 5.0  # Retract in 5mm increments
+
+        logging.info('ToolCommands: Retracting from toolhead to extruder sensor with feed assist')
+
+        while distance_retracted < max_retract:
+            # Check if sensor has cleared
+            if not self._check_sensor(self.controller.extruder_sensor):
+                logging.info(f'ToolCommands: Extruder sensor cleared after {distance_retracted}mm')
+                break
+
+            # Retract another increment
+            self._extruder_move(-increment, homing_speed)
+            distance_retracted += increment
+            self.dwell(delay=0.05)  # Small delay for sensor to update
+
+        # Disable feed assist
+        self._disable_feed_assist(tool)
+
+        if distance_retracted >= max_retract:
+            logging.warning(f'ToolCommands: Reached max retract ({max_retract}mm) but sensor still triggered')
         else:
-            # Fallback: retract configured distance
-            self._extruder_move(-max_retract, homing_speed)
+            logging.info(f'ToolCommands: Successfully retracted {distance_retracted}mm to clear extruder sensor')
 
     def _retract_to_gate(self, tool):
         """
@@ -529,9 +558,8 @@ class ToolCommands:
             gate_status = device_info.get('slots', [{}])[local_gate] if local_gate < len(device_info.get('slots', [])) else {}
             logging.info(f'ToolCommands: Gate {local_gate} status before feed: {gate_status}')
 
-            # Start feeding with extra length (we'll stop when sensor triggers)
-            # Feed length + extra distance to ensure we reach the sensor
-            feed_length = self.controller.toolchange_feed_length + self.controller.toolhead_homing_max
+            # Start feeding configured bowden length (sensor monitoring will stop when triggered)
+            feed_length = self.controller.toolchange_feed_length
             feed_speed = self.controller.feed_speed
 
             def feed_callback(response):
