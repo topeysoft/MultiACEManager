@@ -549,12 +549,12 @@ class ToolCommands:
             slowdown_time = self.controller.toolchange_feed_length / self.controller.feed_speed
             has_slowed = False
 
-            # Monitor sensor in a loop
+            # Monitor sensor in a loop using direct pin queries for real-time detection
             timeout = 60.0  # 60 second timeout
-            sensor_state = self._check_sensor(self.controller.extruder_sensor)
+            sensor_state = self.controller.query_sensor_pin(self.controller.extruder_sensor)
             logging.info(f'ToolCommands: Starting sensor monitoring. Initial state: {sensor_state}, sensor: {self.controller.extruder_sensor}')
 
-            while not self._check_sensor(self.controller.extruder_sensor):
+            while not self.controller.query_sensor_pin(self.controller.extruder_sensor):
                 # Check if we should slow down for accuracy
                 elapsed = self.reactor.monotonic() - start_time
                 if not has_slowed and elapsed >= slowdown_time:
@@ -564,7 +564,7 @@ class ToolCommands:
 
                 # Check if device finished (sensor never triggered - error)
                 if device.is_ready():
-                    sensor_state = self._check_sensor(self.controller.extruder_sensor)
+                    sensor_state = self.controller.query_sensor_pin(self.controller.extruder_sensor)
                     device_info = device.get_status()
                     gate_status = device_info.get('slots', [{}])[local_gate] if local_gate < len(device_info.get('slots', [])) else {}
                     logging.error(f'ToolCommands: Feed completed but sensor not triggered.')
@@ -641,14 +641,14 @@ class ToolCommands:
         # Wait a moment for feed assist to engage
         self.dwell(delay=0.1)
 
-        # Incrementally move extruder while monitoring toolhead sensor
+        # Incrementally move extruder while monitoring toolhead sensor using direct pin queries
         timeout = 60.0  # 60 second timeout
         start_time = self.reactor.monotonic()
         distance_fed = 0.0
 
         logging.info('ToolCommands: Feeding to toolhead sensor with incremental moves')
 
-        while not self._check_sensor(self.controller.toolhead_sensor):
+        while not self.controller.query_sensor_pin(self.controller.toolhead_sensor):
             # Check for timeout
             elapsed = self.reactor.monotonic() - start_time
             if elapsed > timeout:

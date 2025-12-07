@@ -285,6 +285,39 @@ class AceController:
     # Helper Methods (used by command modules)
     # ========================================================================
 
+    def query_sensor_pin(self, sensor):
+        """
+        Query sensor pin state directly from MCU.
+
+        This bypasses the cached button callback state and reads the pin directly,
+        ensuring real-time sensor detection during tool changes.
+
+        Args:
+            sensor: Sensor object (extruder_sensor or toolhead_sensor)
+
+        Returns:
+            bool: True if filament is detected (pin triggered), False otherwise
+        """
+        if sensor is None:
+            return False
+
+        # Get the endstop for this sensor
+        endstop = self.endstops.get(sensor.runout_helper.name)
+        if endstop is None:
+            logging.warning(f"AceController: No endstop found for sensor {sensor.runout_helper.name}, falling back to cached state")
+            return sensor.runout_helper.filament_present
+
+        # Query the endstop pin state directly
+        # This returns the current pin state from the MCU
+        print_time = self.toolhead.get_last_move_time()
+        pin_value = endstop.query_endstop(print_time)
+
+        # Pin logic: typically sensor is triggered when pin goes high (filament present)
+        # But this depends on the pin configuration (^ for pullup, ! for invert)
+        # The button handler passes state directly, so we match that behavior
+        return bool(pin_value)
+
+
     def get_status(self, eventtime=None):
         """
         Get status for Klipper status reporting.
