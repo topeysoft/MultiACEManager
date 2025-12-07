@@ -151,7 +151,7 @@ serial_ports: /dev/ttyACM1, /dev/ttyACM0
 
 ### Commands not found
 ```bash
-# Install/reinstall ace.py
+# Install/reinstall ACE package
 cd ~/KlipperACE
 ./install.sh
 sudo systemctl restart klipper
@@ -161,18 +161,23 @@ sudo systemctl restart klipper
 
 ```
 ~/KlipperACE/                              # Repo
-  ├── extras/ace.py                      # Main module
+  ├── extras/                            # Modular package
+  │   ├── __init__.py                    # Entry point
+  │   ├── ace_controller.py              # Main controller
+  │   ├── protocol/                      # Protocol layer
+  │   ├── device/                        # Device layer
+  │   ├── sensors/                       # Sensors layer
+  │   └── commands/                      # Commands layer
   ├── probe_ace_ports.py                 # Detection tool
-  ├── ace_manager_simple.cfg             # Simple config
-  └── SIMPLE_CONFIG_GUIDE.md             # Full guide
+  └── install.sh                         # Installation script
 
 ~/printer_data/config/                   # Klipper config
   ├── printer.cfg                        # Main config
   ├── ace.cfg                            # ACE config (include this)
   └── ace_vars.cfg                       # Variables (auto-created)
 
-/home/pi/klipper/klippy/extras/          # Klipper modules
-  └── ace.py                             # Installed here by install.sh
+~/klipper/klippy/extras/                 # Klipper modules
+  └── ace/                               # Installed package (symlinks)
 ```
 
 ## 📚 Documentation Map

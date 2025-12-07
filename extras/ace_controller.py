@@ -246,12 +246,48 @@ class AceController:
                     # Check for endless spool
                     if self.save_variables.allVariables.get('ace_endless_spool', False):
                         logging.info('AceController: Endless spool enabled, searching for replacement')
-                        # TODO: Implement endless spool logic
-                        # This would search for another gate with the same material
+
+                        # Get material configuration
+                        ace_material = self.save_variables.allVariables.get('ace_gate_type', [''] * self.device_manager.total_gates)
+
+                        # Ensure material array matches total gates
+                        while len(ace_material) < self.device_manager.total_gates:
+                            ace_material.append('')
+
+                        # Get current material type
+                        runout_material = ace_material[current_index] if current_index < len(ace_material) else ''
+
+                        # Get all gate statuses from device manager
+                        aggregated_status = self.device_manager.get_aggregated_status()
+                        all_slots = aggregated_status.get('slots', [])
+
+                        # Filter available spools: not empty, same material, not the runout gate
+                        spools = list(filter(
+                            lambda x: x['status'] != 'empty'
+                                and x['index'] != current_index
+                                and (x['index'] < len(ace_material) and ace_material[x['index']] == runout_material),
+                            all_slots
+                        ))
+
+                        if len(spools) == 0:
+                            logging.warning("AceController: No suitable spools for endless spool - no matching material or all empty")
+                            self.gcode.respond_info(f'Filament runout on T{current_index}! No matching spools available (material: {runout_material})')
+                        else:
+                            replacement_gate = spools[0]['index']
+                            logging.info(f'AceController: Endless spool - switching from T{current_index} to T{replacement_gate} (material: {runout_material})')
+                            self.gcode.respond_info(f'Endless spool: T{current_index} empty, switching to T{replacement_gate}')
+
+                            # Execute tool change
+                            self.gcode.run_script_from_command(f'ACE_CHANGE_TOOL TOOL={replacement_gate}')
+
+                            # Resume print
+                            pause_resume.send_resume_command()
                     else:
                         self.gcode.respond_info('Filament runout! Endless spool disabled')
             except Exception as e:
                 logging.error(f"AceController: Error handling runout: {e}")
+                import traceback
+                traceback.print_exc()
 
     def _register_commands(self):
         """Register G-code commands via command modules"""

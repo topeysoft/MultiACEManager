@@ -16,7 +16,7 @@ cd KlipperACE
 ```
 
 This will automatically:
-- ✅ Install Klipper extension (`ace.py`)
+- ✅ Install Klipper extension (modular `ace/` package)
 - ✅ Install Moonraker component (`ace_manager.py`)
 - ✅ Add `[ace_manager]` to moonraker.conf
 - ✅ Add update manager configuration
@@ -28,11 +28,11 @@ This will automatically:
 ## What Gets Installed
 
 ### 1. Klipper Extension
-**File**: `~/klipper/klippy/extras/ace.py` (symlink)
-- Provides ACE Manager and KlipperACE classes
-- GCode commands (ACE_CHANGE_TOOL, ACE_SCAN_DEVICES, etc.)
+**Location**: `~/klipper/klippy/extras/ace/` (modular package)
+- Provides AceController and modular architecture
+- GCode commands (ACE_CHANGE_TOOL, ACE_STATUS, etc.)
 - USB device auto-detection
-- Multi-device management
+- Multi-device management (up to 4 devices, 16 gates)
 
 ### 2. Moonraker Component
 **File**: `~/moonraker/moonraker/components/ace_manager.py` (symlink)
@@ -66,8 +66,16 @@ cd KlipperACE
 
 ### Step 2: Install Klipper Extension
 
+The install script automatically creates the modular package structure. To do it manually:
+
 ```bash
-ln -sf ~/KlipperACE/extras/ace.py ~/klipper/klippy/extras/ace.py
+# Create ace package directory
+mkdir -p ~/klipper/klippy/extras/ace
+
+# Link all modular files (see install.sh for complete list)
+ln -sf ~/KlipperACE/extras/__init__.py ~/klipper/klippy/extras/ace/__init__.py
+ln -sf ~/KlipperACE/extras/ace_controller.py ~/klipper/klippy/extras/ace/ace_controller.py
+# ... (see install.sh for all files)
 ```
 
 ### Step 3: Install Moonraker Component
@@ -159,9 +167,9 @@ See [ace_manager_example.cfg](ace_manager_example.cfg) for complete configuratio
 
 ```bash
 # Verify symlink exists
-ls -l ~/klipper/klippy/extras/ace.py
+ls -la ~/klipper/klippy/extras/ace/
 
-# Should show: ace.py -> /home/pi/KlipperACE/extras/ace.py
+# Should show modular package structure with symlinks
 ```
 
 ### 2. Check Moonraker Installation

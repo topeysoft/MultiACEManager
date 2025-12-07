@@ -1,15 +1,15 @@
 <div align="center">
 
 <!-- LOGO PLACEHOLDER -->
-<img style="margin-top: 15px; margin-bottom: -15px; margin-left: 25px" src="./.github/img/logo.svg" alt="BunnyACE" width="120" height="120" />
-<h1 style="margin-top: 0">Bunny<span style="color:deepskyblue">ACE</span> </h1>
+<img style="margin-top: 15px; margin-bottom: -15px; margin-left: 25px" src="./.github/img/logo.svg" alt="KlipperACE" width="120" height="120" />
+<h1 style="margin-top: 0">KlipperACE</h1>
 
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE.md)
 ![Status](https://img.shields.io/badge/Status-WIP-orange)
 ![Klipper](https://img.shields.io/badge/Klipper-Module-blue)
 ![Anycubic ACE](https://img.shields.io/badge/Anycubic-ACE%20Pro-8A2BE2)
 
-<p>Драйвер для Anycubic Color Engine Pro (ACE) под Klipper 🐰🎨</p>
+<p>Драйвер для Anycubic Color Engine Pro (ACE) под Klipper</p>
 <p>Управление подачей нити, сменой инструмента (до 4 каналов), сушилкой ACE и сценариями прямо из Klipper/G-code.</p>
 
 [English version →](./README.md)
@@ -53,25 +53,25 @@
 Удалите/прокомментируйте все разделы о вашем текущем датчике филамента (filament runout sensor) в вашем printer.cfg, поскольку вы собираетесь использовать датчик в голове принтера (extruder_sensor) для обнаружения филамента.
 ```bash
 cd ~
-git clone https://github.com/BlackFrogKok/BunnyACE.git
-cd BunnyACE
+git clone https://github.com/topeysoft/MultiACEManager.git KlipperACE
+cd KlipperACE
 ./install.sh
 ```
 
 После установки:
 - В конфиг printer.cf необходимо будет добавить [include ace.cfg].
-- В Moonraker появится Update Manager "BunnyACE" для обновления из веб‑интерфейса.
+- В Moonraker появится Update Manager "KlipperACE" для обновления из веб‑интерфейса.
 
 Важно: если у вас уже есть свой [save_variables], перенесите переменные из ace_vars.cfg в ваш файл переменных и закомментируйте блок [save_variables] в ace.cfg.
 
 ## 🔄 Обновление
-- Через Web UI: Moonraker Update Manager → BunnyACE
+- Через Web UI: Moonraker Update Manager → KlipperACE
 
 ## 🗑️ Удаление
 1) Уберите [include ace.cfg] из конфигурации Klipper и секцию обновления из moonraker.conf.
 2) Выполните:
 ```bash
-cd ~/BunnyACE
+cd ~/KlipperACE
 ./install.sh -u
 ```
 
