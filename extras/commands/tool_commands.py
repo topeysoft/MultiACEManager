@@ -613,10 +613,8 @@ class ToolCommands:
                             self.gcode.run_script_from_command(f"{self.controller.error_macros} TOOL={tool} ERROR='EXTRUDER_SENSOR_NOT_TRIGGERED'")
                         except Exception as e:
                             logging.error(f'ToolCommands: Error macro failed: {e}')
-                        self.gcode.respond_info(error_msg)
-                        return
-                    else:
-                        raise AceException(error_msg)
+
+                    raise AceException(error_msg)
 
                 # Poll delay (like BunnyACE line 759)
                 self.dwell(delay=0.01)
