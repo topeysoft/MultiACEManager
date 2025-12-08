@@ -584,8 +584,19 @@ class ToolCommands:
 
                 # Check if feed completed without triggering sensor (error)
                 if self._is_ready(tool):
+                    # Feed stopped unexpectedly - get detailed status
+                    device, local_gate = self.device_manager.get_device_for_gate(tool)
+                    device_info = device.get_status()
+                    gate_status = device_info.get('slots', [{}])[local_gate] if local_gate < len(device_info.get('slots', [])) else {}
+                    elapsed = self.reactor.monotonic() - start_fast_feed
+
                     error_msg = 'ACE Error: Load failed - extruder sensor not triggered'
                     logging.error(f'ToolCommands: {error_msg}')
+                    logging.error(f'ToolCommands: Feed stopped after {elapsed:.3f}s')
+                    logging.error(f'ToolCommands: Gate {tool} (local {local_gate}) status: {gate_status}')
+                    logging.error(f'ToolCommands: Device status: {device_info.get("status")}')
+                    logging.error(f'ToolCommands: Full device info: {device_info}')
+
                     if self.controller.error_macros:
                         try:
                             self.gcode.run_script_from_command(f"{self.controller.error_macros} TOOL={tool} ERROR='EXTRUDER_SENSOR_NOT_TRIGGERED'")
