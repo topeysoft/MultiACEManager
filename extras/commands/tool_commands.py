@@ -527,7 +527,7 @@ class ToolCommands:
                 logging.error(f'ToolCommands: Failed to feed to extruder: {e}')
             return
 
-        # Incremental sensor-monitored feeding approach
+        # Continuous feed with sensor monitoring (matches BunnyACE approach)
         try:
             device, local_gate = self.device_manager.get_device_for_gate(tool)
 
@@ -539,97 +539,51 @@ class ToolCommands:
             gate_status = device_info.get('slots', [{}])[local_gate] if local_gate < len(device_info.get('slots', [])) else {}
             logging.info(f'ToolCommands: Gate {local_gate} status before feed: {gate_status}')
 
-            # Incremental feeding parameters
+            # Feed parameters - send ONE continuous feed command
             total_distance = self.controller.toolchange_feed_length
-            fast_chunk_size = 100  # mm - fast feeding in larger chunks to minimize pauses
-            slow_chunk_size = 20   # mm - slow feeding for precision
-            slowdown_margin = 100  # mm - switch to slow chunks when within this distance
-            distance_fed = 0.0
+            feed_length = total_distance + self.controller.toolhead_homing_max  # Extra margin for safety
             fast_speed = self.controller.feed_speed
             slow_speed = self.controller.toolhead_homing_speed
+            slowdown_time = total_distance / fast_speed  # Time to reach slowdown point
             timeout = 60.0  # 60 second timeout
             start_time = self.reactor.monotonic()
+            has_slowed = False
 
             def feed_callback(response):
                 logging.debug(f'ToolCommands: Feed callback received: {response}')
                 if 'code' in response and response['code'] != 0:
                     self.gcode.respond_info(f"ACE Error: {response.get('msg', 'Unknown error')}")
 
-            logging.info(f'ToolCommands: Starting incremental feed to extruder sensor (target: {total_distance}mm)')
+            logging.info(f'ToolCommands: Starting continuous feed to extruder sensor (target: {total_distance}mm, max: {feed_length}mm)')
 
-            # Feed in chunks until sensor triggers
-            poll_interval = 0.002  # 2ms polling interval for faster sensor detection
-            in_slow_mode = False
+            # Start ONE continuous feed operation (like BunnyACE)
+            device.feed(local_gate, feed_length, fast_speed, feed_callback)
+
+            # Poll sensor while device is feeding
+            poll_interval = 0.005  # 5ms polling for responsive detection
 
             while not self.controller.query_sensor_pin(self.controller.extruder_sensor):
-                # Check for timeout
+                # Check if we should slow down as we approach target
                 elapsed = self.reactor.monotonic() - start_time
-                if elapsed > timeout:
-                    error_msg = f'ACE Error: Load timeout - extruder sensor not triggered after {timeout}s (fed {distance_fed}mm)'
-                    logging.error(f'ToolCommands: {error_msg}')
-                    if self.controller.error_macros:
-                        try:
-                            sensor_state = self.controller.query_sensor_pin(self.controller.extruder_sensor)
-                            error_cmd = f"{self.controller.error_macros} TOOL={tool} ERROR='TIMEOUT' FEED_LENGTH={distance_fed} ELAPSED={elapsed:.2f} SENSOR_STATE={sensor_state}"
-                            self.gcode.run_script_from_command(error_cmd)
-                        except Exception as e:
-                            logging.error(f'ToolCommands: Error macro failed: {e}')
-                        self.gcode.respond_info(error_msg)
-                        return
-                    else:
-                        raise AceException(error_msg)
+                if not has_slowed and elapsed >= slowdown_time:
+                    logging.info(f'ToolCommands: Approaching target distance, slowing feed speed to {slow_speed}mm/s')
+                    self._set_feeding_speed(tool, slow_speed)
+                    has_slowed = True
 
-                # Determine chunk size and speed based on distance remaining
-                distance_remaining = total_distance - distance_fed
-
-                if distance_remaining <= slowdown_margin:
-                    # Slow phase: small chunks for precision
-                    chunk_size = min(slow_chunk_size, distance_remaining + slowdown_margin)
-                    speed = slow_speed
-                    if not in_slow_mode:
-                        logging.info(f'ToolCommands: Entering slow feed mode at {distance_fed}mm (remaining: {distance_remaining}mm)')
-                        in_slow_mode = True
-                else:
-                    # Fast phase: larger chunks for speed
-                    chunk_size = fast_chunk_size
-                    speed = fast_speed
-
-                # Feed one chunk
-                logging.debug(f'ToolCommands: Feeding chunk {chunk_size}mm at {speed}mm/s (total fed: {distance_fed}mm)')
-                device.feed(local_gate, chunk_size, speed, feed_callback)
-                distance_fed += chunk_size
-
-                # Poll sensor while device is feeding (don't wait for completion)
-                while not device.is_ready():
-                    if self.controller.query_sensor_pin(self.controller.extruder_sensor):
-                        # Sensor triggered! Stop immediately
-                        logging.info(f'ToolCommands: Extruder sensor triggered during feed at ~{distance_fed}mm, stopping')
-                        self._stop_feeding(tool)
-                        device.wait_ready()  # Wait for stop to complete
-                        logging.info(f'ToolCommands: Feed stopped after sensor trigger')
-                        break
-                    self.dwell(delay=poll_interval)
-
-                # Check sensor one more time after chunk completes
-                if self.controller.query_sensor_pin(self.controller.extruder_sensor):
-                    logging.info(f'ToolCommands: Extruder sensor triggered after chunk completed at {distance_fed}mm')
-                    break
-
-                # Check if we've exceeded expected distance without trigger
-                if distance_fed > total_distance + slowdown_margin:
+                # Check if device finished feeding without sensor trigger (error)
+                if device.is_ready():
                     sensor_state = self.controller.query_sensor_pin(self.controller.extruder_sensor)
                     device_info = device.get_status()
                     gate_status = device_info.get('slots', [{}])[local_gate] if local_gate < len(device_info.get('slots', [])) else {}
-                    elapsed = self.reactor.monotonic() - start_time
-                    logging.error(f'ToolCommands: Fed {distance_fed}mm (expected: {total_distance}mm) without triggering sensor')
-                    logging.error(f'  Sensor state: {sensor_state}, elapsed: {elapsed:.2f}s')
+                    logging.error(f'ToolCommands: Feed completed but sensor not triggered')
+                    logging.error(f'  Sensor state: {sensor_state}, elapsed: {elapsed:.2f}s, feed_length: {feed_length}mm')
                     logging.error(f'  Gate {local_gate} status: {gate_status}')
 
                     # Call error handler macro if configured
-                    error_msg = f'ACE Error: Load failed - extruder sensor not triggered (fed {distance_fed}mm, expected {total_distance}mm)'
+                    error_msg = f'ACE Error: Load failed - extruder sensor not triggered (fed {feed_length}mm in {elapsed:.1f}s)'
                     if self.controller.error_macros:
                         try:
-                            error_cmd = f"{self.controller.error_macros} TOOL={tool} ERROR='EXTRUDER_SENSOR_NOT_TRIGGERED' FEED_LENGTH={distance_fed} ELAPSED={elapsed:.2f} SENSOR_STATE={sensor_state}"
+                            error_cmd = f"{self.controller.error_macros} TOOL={tool} ERROR='EXTRUDER_SENSOR_NOT_TRIGGERED' FEED_LENGTH={feed_length} ELAPSED={elapsed:.2f} SENSOR_STATE={sensor_state}"
                             logging.info(f'ToolCommands: Calling error macro: {error_cmd}')
                             self.gcode.run_script_from_command(error_cmd)
                         except Exception as e:
@@ -639,8 +593,35 @@ class ToolCommands:
                     else:
                         raise AceException(error_msg)
 
-            # Sensor triggered successfully!
-            logging.info(f'ToolCommands: Extruder sensor triggered at {distance_fed}mm (expected: {total_distance}mm, delta: {distance_fed - total_distance:+.1f}mm)')
+                # Check for timeout
+                if elapsed > timeout:
+                    self._stop_feeding(tool)
+                    error_msg = f'ACE Error: Load timeout - extruder sensor not triggered after {timeout}s'
+                    logging.error(f'ToolCommands: {error_msg}')
+                    if self.controller.error_macros:
+                        try:
+                            sensor_state = self.controller.query_sensor_pin(self.controller.extruder_sensor)
+                            error_cmd = f"{self.controller.error_macros} TOOL={tool} ERROR='TIMEOUT' ELAPSED={elapsed:.2f} SENSOR_STATE={sensor_state}"
+                            self.gcode.run_script_from_command(error_cmd)
+                        except Exception as e:
+                            logging.error(f'ToolCommands: Error macro failed: {e}')
+                        self.gcode.respond_info(error_msg)
+                        return
+                    else:
+                        raise AceException(error_msg)
+
+                # Small delay before next sensor check
+                self.dwell(delay=poll_interval)
+
+            # Sensor triggered! Stop feeding immediately
+            elapsed = self.reactor.monotonic() - start_time
+            estimated_distance = fast_speed * elapsed if not has_slowed else (total_distance + slow_speed * (elapsed - slowdown_time))
+            logging.info(f'ToolCommands: Extruder sensor triggered after {elapsed:.2f}s (~{estimated_distance:.1f}mm), stopping feed')
+            self._stop_feeding(tool)
+
+            # Wait for device to complete the stop
+            device.wait_ready()
+            logging.info('ToolCommands: Feed stopped successfully')
 
             # Apply overshoot compensation if configured
             if self.controller.sensor_overshoot_compensation > 0:
