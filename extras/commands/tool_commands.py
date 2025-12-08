@@ -574,7 +574,18 @@ class ToolCommands:
             logging.info(f'ToolCommands: After 0.1s dwell, device ready: {device.is_ready()}')
 
             # Monitor sensor while feeding (like BunnyACE lines 751-760)
-            while not self.controller.query_sensor_pin(self.controller.extruder_sensor):
+            # Use runout_helper.filament_present like BunnyACE does
+            loop_count = 0
+            while not bool(self.controller.extruder_sensor.runout_helper.filament_present):
+                loop_count += 1
+
+                # Log progress every 100 iterations (~1 second at 10ms polling)
+                if loop_count % 100 == 0:
+                    elapsed = self.reactor.monotonic() - start_fast_feed
+                    estimated_distance = self.controller.feed_speed * elapsed
+                    sensor_state = self.controller.extruder_sensor.runout_helper.filament_present
+                    logging.info(f'ToolCommands: Feeding progress: {elapsed:.1f}s, ~{estimated_distance:.0f}mm, sensor: {sensor_state}')
+
                 # Slow down when approaching target (like BunnyACE lines 752-755)
                 if (start_fast_feed and
                     (self.reactor.monotonic() - start_fast_feed) >= (self.controller.toolchange_feed_length // self.controller.feed_speed)):
