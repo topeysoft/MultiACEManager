@@ -90,8 +90,30 @@ class ToolCommands:
             self.gcode.respond_info(f'ACE: Already on tool {tool}')
             return
 
-        logging.info(f'ToolCommands: Tool change {was} => {tool}')
+        logging.info(f'ToolCommands: ========================================')
+        logging.info(f'ToolCommands: TOOL CHANGE START: {was} => {tool}')
+        logging.info(f'ToolCommands: Feed assist states before change: {self.controller.gate_feed_assist}')
+        logging.info(f'ToolCommands: ========================================')
         self.gcode.respond_info(f'ACE: Tool change {was} => {tool}')
+
+        # Check if target gate is ready (like BunnyACE line 799-803)
+        if tool != -1:
+            try:
+                device, local_gate = self.device_manager.get_device_for_gate(tool)
+                device_info = device.get_status()
+                gate_status = device_info.get('slots', [{}])[local_gate] if local_gate < len(device_info.get('slots', [])) else {}
+                status = gate_status.get('status', 'unknown')
+
+                logging.info(f'ToolCommands: Target gate {tool} (local {local_gate}) status: {status}')
+                logging.info(f'ToolCommands: Full gate status: {gate_status}')
+
+                if status != 'ready':
+                    error_msg = f'ACE Error: Gate {tool} is not ready (status: {status})'
+                    logging.error(f'ToolCommands: {error_msg}')
+                    self.gcode.respond_info(error_msg)
+                    raise gcmd.error(error_msg)
+            except ValueError as e:
+                logging.error(f'ToolCommands: Failed to check gate status: {e}')
 
         # Execute pre-toolchange macro
         try:
@@ -102,14 +124,21 @@ class ToolCommands:
         if tool == -1:
             # Unload sequence
             if was >= 0:
+                logging.info(f'ToolCommands: Starting unload of tool {was}')
                 self._unload_tool(was)
+                logging.info(f'ToolCommands: Unload complete. Feed assist states: {self.controller.gate_feed_assist}')
             else:
                 self.gcode.respond_info('ACE: No tool loaded, nothing to unload')
         else:
             # Full tool change sequence
             if was >= 0:
+                logging.info(f'ToolCommands: Starting unload of tool {was}')
                 self._unload_tool(was)
+                logging.info(f'ToolCommands: Unload complete. Feed assist states: {self.controller.gate_feed_assist}')
+
+            logging.info(f'ToolCommands: Starting load of tool {tool}')
             self._load_tool(tool)
+            logging.info(f'ToolCommands: Load complete. Feed assist states: {self.controller.gate_feed_assist}')
 
         # Execute post-toolchange macro
         try:
@@ -520,17 +549,29 @@ class ToolCommands:
             feed_length = self.controller.toolchange_feed_length + self.controller.toolhead_homing_max
             start_fast_feed = self.reactor.monotonic()
 
-            logging.info(f'ToolCommands: Starting feed to extruder sensor ({feed_length}mm at {self.controller.feed_speed}mm/s)')
+            # Check device and gate status before feeding
+            logging.info(f'ToolCommands: Starting feed to extruder sensor')
+            logging.info(f'  Device: {device.device_id}, Gate: {local_gate}, Length: {feed_length}mm, Speed: {self.controller.feed_speed}mm/s')
+            logging.info(f'  Device ready: {device.is_ready()}')
+            logging.info(f'  Feed assist currently: {self.controller.gate_feed_assist.get(tool, False)}')
 
             # Send feed command with no wait (like BunnyACE _feed with how_wait=0)
             def feed_callback(response):
+                logging.info(f"ToolCommands: Feed callback: {response}")
                 if 'code' in response and response['code'] != 0:
-                    logging.error(f"ToolCommands: ACE Error: {response.get('msg', 'Unknown error')}")
+                    logging.error(f"ToolCommands: ACE Feed FAILED: {response.get('msg', 'Unknown error')}")
+                    logging.error(f"  Full response: {response}")
+                else:
+                    logging.info(f"ToolCommands: Feed command accepted by ACE device")
 
+            logging.info(f'ToolCommands: Sending feed command to ACE...')
             device.feed(local_gate, feed_length, self.controller.feed_speed, feed_callback)
+            logging.info(f'ToolCommands: Feed command sent, waiting 0.1s for start...')
 
             # Small dwell to let command start (like BunnyACE's 0.1s dwell)
             self.dwell(delay=0.1)
+
+            logging.info(f'ToolCommands: After 0.1s dwell, device ready: {device.is_ready()}')
 
             # Monitor sensor while feeding (like BunnyACE lines 751-760)
             while not self.controller.query_sensor_pin(self.controller.extruder_sensor):
@@ -618,7 +659,14 @@ class ToolCommands:
         start_time = self.reactor.monotonic()
         distance_fed = 0.0
 
+        # Verify feed assist is enabled
+        if not self.controller.gate_feed_assist[tool]:
+            logging.warning(f'ToolCommands: Feed assist not enabled for gate {tool}! Enabling now...')
+            self._enable_feed_assist(tool)
+
         logging.info('ToolCommands: Feeding to toolhead sensor (with feed assist)')
+        logging.info(f'  Extruder speed: {self.controller.extruder_move_speed}mm/s, timeout: {timeout}s')
+        logging.info(f'  Feed assist enabled: {self.controller.gate_feed_assist[tool]}')
 
         while not self.controller.query_sensor_pin(self.controller.toolhead_sensor):
             # Check for timeout
