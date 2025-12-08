@@ -683,13 +683,20 @@ class ToolCommands:
         distance_fed = 0.0
 
         # Verify feed assist is enabled
-        if not self.controller.gate_feed_assist[tool]:
-            logging.warning(f'ToolCommands: Feed assist not enabled for gate {tool}! Enabling now...')
+        if tool < len(self.controller.gate_feed_assist):
+            feed_assist_enabled = self.controller.gate_feed_assist[tool]
+            if not feed_assist_enabled:
+                logging.warning(f'ToolCommands: Feed assist not enabled for gate {tool}! Enabling now...')
+                self._enable_feed_assist(tool)
+        else:
+            # List not large enough - enable feed assist
+            logging.warning(f'ToolCommands: gate_feed_assist list too small (size={len(self.controller.gate_feed_assist)}, tool={tool}), enabling feed assist...')
             self._enable_feed_assist(tool)
+            feed_assist_enabled = False
 
         logging.info('ToolCommands: Feeding to toolhead sensor (with feed assist)')
         logging.info(f'  Extruder speed: {self.controller.extruder_move_speed}mm/s, timeout: {timeout}s')
-        logging.info(f'  Feed assist enabled: {self.controller.gate_feed_assist[tool]}')
+        logging.info(f'  Feed assist enabled: {feed_assist_enabled if tool < len(self.controller.gate_feed_assist) else "unknown"}')
 
         while not self.controller.query_sensor_pin(self.controller.toolhead_sensor):
             # Check for timeout
@@ -879,8 +886,14 @@ class ToolCommands:
                 if 'code' in response and response['code'] != 0:
                     self.gcode.respond_info(f"ACE Error: {response.get('msg', 'Unknown error')}")
                 else:
-                    # Update controller state on success
-                    self.controller.gate_feed_assist[tool] = True
+                    # Update controller state on success (with bounds checking)
+                    if tool < len(self.controller.gate_feed_assist):
+                        self.controller.gate_feed_assist[tool] = True
+                    else:
+                        # Extend list if needed
+                        while len(self.controller.gate_feed_assist) <= tool:
+                            self.controller.gate_feed_assist.append(False)
+                        self.controller.gate_feed_assist[tool] = True
 
             device.start_feed_assist(local_gate, callback)
             logging.info(f'ToolCommands: Enabled feed assist for tool {tool}')
@@ -902,8 +915,15 @@ class ToolCommands:
                 if 'code' in response and response['code'] != 0:
                     self.gcode.respond_info(f"ACE Error: {response.get('msg', 'Unknown error')}")
                 else:
-                    # Update controller state on success
-                    self.controller.gate_feed_assist[tool] = False
+                    # Update controller state on success (with bounds checking)
+                    if tool < len(self.controller.gate_feed_assist):
+                        self.controller.gate_feed_assist[tool] = False
+                    else:
+                        # Extend list if needed
+                        while len(self.controller.gate_feed_assist) <= tool:
+                            self.controller.gate_feed_assist.append(False)
+                        # Already False, but set it anyway for clarity
+                        self.controller.gate_feed_assist[tool] = False
 
             device.stop_feed_assist(local_gate, callback)
             logging.info(f'ToolCommands: Disabled feed assist for tool {tool}')
