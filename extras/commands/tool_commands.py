@@ -553,7 +553,7 @@ class ToolCommands:
             logging.info(f'ToolCommands: Starting feed to extruder sensor')
             logging.info(f'  Device: {device.device_id}, Gate: {local_gate}, Length: {feed_length}mm, Speed: {self.controller.feed_speed}mm/s')
             logging.info(f'  Device ready: {device.is_ready()}')
-            logging.info(f'  Feed assist currently: {self.controller.gate_feed_assist.get(tool, False)}')
+            logging.info(f'  Feed assist currently: {self.controller.gate_feed_assist[tool] if tool < len(self.controller.gate_feed_assist) else False}')
 
             # Send feed command with no wait (like BunnyACE _feed with how_wait=0)
             def feed_callback(response):
