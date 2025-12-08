@@ -576,6 +576,7 @@ class ToolCommands:
             # Monitor sensor while feeding (like BunnyACE lines 751-760)
             # Use runout_helper.filament_present like BunnyACE does
             loop_count = 0
+            min_feed_time = 1.0  # Minimum 1 second before checking ready status (avoid false positives from ACE firmware status reporting)
             while not bool(self.controller.extruder_sensor.runout_helper.filament_present):
                 loop_count += 1
 
@@ -593,13 +594,13 @@ class ToolCommands:
                     self._set_feeding_speed(tool, self.controller.toolhead_homing_speed)
                     start_fast_feed = 0  # Only slow down once
 
-                # Check if feed completed without triggering sensor (error)
-                if self._is_ready(tool):
+                # Check if feed stopped prematurely (only after minimum feed time to avoid false positives)
+                elapsed = self.reactor.monotonic() - start_fast_feed
+                if elapsed > min_feed_time and self._is_ready(tool):
                     # Feed stopped unexpectedly - get detailed status
                     device, local_gate = self.device_manager.get_device_for_gate(tool)
                     device_info = device.get_status()
                     gate_status = device_info.get('slots', [{}])[local_gate] if local_gate < len(device_info.get('slots', [])) else {}
-                    elapsed = self.reactor.monotonic() - start_fast_feed
 
                     error_msg = 'ACE Error: Load failed - extruder sensor not triggered'
                     logging.error(f'ToolCommands: {error_msg}')
