@@ -575,8 +575,11 @@ class ToolCommands:
 
             # Monitor sensor while feeding (like BunnyACE lines 751-760)
             # Use runout_helper.filament_present like BunnyACE does
+            # Note: Legacy BunnyACE code checks is_ace_ready() to detect premature stop,
+            # but ACE firmware reports 'ready' status immediately after accepting command,
+            # not after motor completes movement. So we use timeout instead.
             loop_count = 0
-            min_feed_time = 1.0  # Minimum 1 second before checking ready status (avoid false positives from ACE firmware status reporting)
+            max_feed_time = (feed_length / self.controller.feed_speed) * 2.0  # 2x expected time as safety margin
             while not bool(self.controller.extruder_sensor.runout_helper.filament_present):
                 loop_count += 1
 
@@ -594,17 +597,16 @@ class ToolCommands:
                     self._set_feeding_speed(tool, self.controller.toolhead_homing_speed)
                     start_fast_feed = 0  # Only slow down once
 
-                # Check if feed stopped prematurely (only after minimum feed time to avoid false positives)
+                # Timeout check - if feeding takes too long, assume failure
                 elapsed = self.reactor.monotonic() - start_fast_feed
-                if elapsed > min_feed_time and self._is_ready(tool):
-                    # Feed stopped unexpectedly - get detailed status
+                if elapsed > max_feed_time:
+                    # Feed timeout - get detailed status
                     device, local_gate = self.device_manager.get_device_for_gate(tool)
                     device_info = device.get_status()
                     gate_status = device_info.get('slots', [{}])[local_gate] if local_gate < len(device_info.get('slots', [])) else {}
 
-                    error_msg = 'ACE Error: Load failed - extruder sensor not triggered'
+                    error_msg = f'ACE Error: Load timeout - extruder sensor not triggered after {elapsed:.1f}s (expected ~{feed_length / self.controller.feed_speed:.1f}s)'
                     logging.error(f'ToolCommands: {error_msg}')
-                    logging.error(f'ToolCommands: Feed stopped after {elapsed:.3f}s')
                     logging.error(f'ToolCommands: Gate {tool} (local {local_gate}) status: {gate_status}')
                     logging.error(f'ToolCommands: Device status: {device_info.get("status")}')
                     logging.error(f'ToolCommands: Full device info: {device_info}')
