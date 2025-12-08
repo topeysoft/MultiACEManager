@@ -60,10 +60,12 @@ class AceController:
         self.toolchange_retract_length = config.getint('toolchange_retract_length', 100)
         self.toolchange_feed_length = config.getint('toolchange_feed_length', 100)
         self.toolchange_retract_for_cut = config.getint('toolchange_retract_for_cut', 5)  # Small retract before tip cut to prevent oozing
+        self.sensor_overshoot_compensation = config.getint('sensor_overshoot_compensation', 0)  # Retract after sensor triggers to compensate for overshoot (0 = disabled)
         self.toolhead_homing_max = config.getint('toolhead_homing_max', 100)
         self.toolhead_homing_speed = config.getint('toolhead_homing_speed', 10)
         self.extruder_move_speed = config.getint('extruder_move_speed', 10)
         self.toolhead_sensor_to_nozzle_length = config.getint('toolhead_sensor_to_nozzle', 0)
+        self.extruder_sensor_to_nozzle_length = config.getint('extruder_sensor_to_nozzle', 0)
         self.poop_macros = config.get('poop_macros', '_POOP')
         self.cut_macros = config.get('cut_macros', '_CUT_TIP')
         self.error_macros = config.get('error_macros', None)
