@@ -541,8 +541,8 @@ class ToolCommands:
 
             # Incremental feeding parameters
             total_distance = self.controller.toolchange_feed_length
-            fast_chunk_size = 50  # mm - fast feeding in larger chunks
-            slow_chunk_size = 10  # mm - slow feeding for precision
+            fast_chunk_size = 100  # mm - fast feeding in larger chunks to minimize pauses
+            slow_chunk_size = 20   # mm - slow feeding for precision
             slowdown_margin = 100  # mm - switch to slow chunks when within this distance
             distance_fed = 0.0
             fast_speed = self.controller.feed_speed
@@ -558,6 +558,9 @@ class ToolCommands:
             logging.info(f'ToolCommands: Starting incremental feed to extruder sensor (target: {total_distance}mm)')
 
             # Feed in chunks until sensor triggers
+            poll_interval = 0.002  # 2ms polling interval for faster sensor detection
+            in_slow_mode = False
+
             while not self.controller.query_sensor_pin(self.controller.extruder_sensor):
                 # Check for timeout
                 elapsed = self.reactor.monotonic() - start_time
@@ -583,8 +586,9 @@ class ToolCommands:
                     # Slow phase: small chunks for precision
                     chunk_size = min(slow_chunk_size, distance_remaining + slowdown_margin)
                     speed = slow_speed
-                    if distance_fed > 0:  # Log only after first chunk
+                    if not in_slow_mode:
                         logging.info(f'ToolCommands: Entering slow feed mode at {distance_fed}mm (remaining: {distance_remaining}mm)')
+                        in_slow_mode = True
                 else:
                     # Fast phase: larger chunks for speed
                     chunk_size = fast_chunk_size
@@ -593,12 +597,22 @@ class ToolCommands:
                 # Feed one chunk
                 logging.debug(f'ToolCommands: Feeding chunk {chunk_size}mm at {speed}mm/s (total fed: {distance_fed}mm)')
                 device.feed(local_gate, chunk_size, speed, feed_callback)
-                device.wait_ready()
                 distance_fed += chunk_size
 
-                # Quick sensor check immediately after chunk completes
+                # Poll sensor while device is feeding (don't wait for completion)
+                while not device.is_ready():
+                    if self.controller.query_sensor_pin(self.controller.extruder_sensor):
+                        # Sensor triggered! Stop immediately
+                        logging.info(f'ToolCommands: Extruder sensor triggered during feed at ~{distance_fed}mm, stopping')
+                        self._stop_feeding(tool)
+                        device.wait_ready()  # Wait for stop to complete
+                        logging.info(f'ToolCommands: Feed stopped after sensor trigger')
+                        break
+                    self.dwell(delay=poll_interval)
+
+                # Check sensor one more time after chunk completes
                 if self.controller.query_sensor_pin(self.controller.extruder_sensor):
-                    logging.info(f'ToolCommands: Extruder sensor triggered after feeding {distance_fed}mm')
+                    logging.info(f'ToolCommands: Extruder sensor triggered after chunk completed at {distance_fed}mm')
                     break
 
                 # Check if we've exceeded expected distance without trigger
