@@ -274,6 +274,25 @@ class AceDeviceManager:
 
         raise ValueError(f"Cannot route gate {global_gate}")
 
+    def get_gate_offset_for_device(self, device_instance: AceDevice) -> int:
+        """
+        Get the global gate offset for a specific device instance.
+
+        Args:
+            device_instance: The AceDevice instance
+
+        Returns:
+            The gate offset for this device (0, 4, 8, or 12)
+
+        Raises:
+            ValueError: If device not found
+        """
+        for device in self.ace_devices:
+            if device['instance'] == device_instance:
+                return device['gate_offset']
+
+        raise ValueError(f"Device {device_instance.device_id} not found in manager")
+
     def get_device_info_lightweight(self) -> List[Dict]:
         """
         Get lightweight device info (connection details only, no status).

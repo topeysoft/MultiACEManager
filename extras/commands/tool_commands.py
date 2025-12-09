@@ -142,6 +142,19 @@ class ToolCommands:
                 self._unload_tool(was)
                 logging.info(f'ToolCommands: Unload complete. Feed assist states: {self.controller.gate_feed_assist}')
 
+                # ACE firmware needs additional time to reset motor controller when
+                # switching between gates on same device
+                try:
+                    old_device, _ = self.device_manager.get_device_for_gate(was)
+                    new_device, _ = self.device_manager.get_device_for_gate(tool)
+
+                    if old_device.device_id == new_device.device_id:
+                        logging.info(f'ToolCommands: Same-device tool change detected, adding firmware stabilization delay')
+                        self.dwell(delay=1.0)  # Firmware needs ~1s to fully reset motor controller
+                        new_device.wait_ready()  # Verify device still ready after delay
+                except ValueError as e:
+                    logging.warning(f'ToolCommands: Could not verify device match: {e}')
+
             logging.info(f'ToolCommands: Starting load of tool {tool}')
             self._load_tool(tool)
             logging.info(f'ToolCommands: Load complete. Feed assist states: {self.controller.gate_feed_assist}')
@@ -917,6 +930,8 @@ class ToolCommands:
         """
         Disable feed assist for specified tool.
 
+        Matches legacy BunnyACE behavior (line 636): only disables specific gate.
+
         Args:
             tool: Tool (gate) number
         """
@@ -925,31 +940,20 @@ class ToolCommands:
 
             def callback(response):
                 if 'code' in response and response['code'] != 0:
-                    self.gcode.respond_info(f"ACE Error: {response.get('msg', 'Unknown error')}")
-                else:
-                    # Update controller state on success (with bounds checking)
-                    if tool < len(self.controller.gate_feed_assist):
-                        self.controller.gate_feed_assist[tool] = False
-                    else:
-                        # Extend list if needed
-                        while len(self.controller.gate_feed_assist) <= tool:
-                            self.controller.gate_feed_assist.append(False)
-                        # Already False, but set it anyway for clarity
-                        self.controller.gate_feed_assist[tool] = False
+                    logging.warning(f"ACE Error disabling feed assist: {response.get('msg', 'Unknown error')}")
 
-            logging.info(f'ToolCommands: Sending stop_feed_assist for tool {tool} (device {device.device_id}, local gate {local_gate})')
+            logging.info(f'ToolCommands: Disabling feed assist for tool {tool} (device {device.device_id}, local gate {local_gate})')
             device.stop_feed_assist(local_gate, callback)
-            device.wait_ready()  # Wait for command to complete
-            logging.info(f'ToolCommands: Device ready after stop_feed_assist')
+            device.wait_ready()
 
-            # ACE firmware needs additional time after response to fully deactivate feed assist
-            # Critical: FORBIDDEN errors occur if we feed too quickly after disabling
-            # Increased from legacy 300ms to 1000ms to ensure firmware fully processes state change
-            logging.info(f'ToolCommands: Starting 1000ms dwell after disabling feed assist for tool {tool}')
-            self.controller.reactor.pause(self.controller.reactor.monotonic() + 1.0)
-            logging.info(f'ToolCommands: Completed 1000ms dwell after disabling feed assist for tool {tool}')
+            # Update controller state
+            if tool < len(self.controller.gate_feed_assist):
+                self.controller.gate_feed_assist[tool] = False
 
-            logging.info(f'ToolCommands: Disabled feed assist for tool {tool}')
+            # Legacy BunnyACE uses 300ms delay after disable (line 646)
+            logging.info(f'ToolCommands: Starting 300ms dwell after disabling feed assist')
+            self.controller.reactor.pause(self.controller.reactor.monotonic() + 0.3)
+            logging.info(f'ToolCommands: Completed dwell, feed assist disabled for tool {tool}')
 
         except ValueError as e:
             logging.error(f'ToolCommands: Failed to disable feed assist: {e}')
