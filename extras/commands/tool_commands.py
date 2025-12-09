@@ -579,6 +579,7 @@ class ToolCommands:
             # but ACE firmware reports 'ready' status immediately after accepting command,
             # not after motor completes movement. So we use timeout instead.
             loop_count = 0
+            has_slowed_down = False  # Track whether we've already slowed down
             max_feed_time = (feed_length / self.controller.feed_speed) * 2.0  # 2x expected time as safety margin
             while not bool(self.controller.extruder_sensor.runout_helper.filament_present):
                 loop_count += 1
@@ -591,11 +592,11 @@ class ToolCommands:
                     logging.info(f'ToolCommands: Feeding progress: {elapsed:.1f}s, ~{estimated_distance:.0f}mm, sensor: {sensor_state}')
 
                 # Slow down when approaching target (like BunnyACE lines 752-755)
-                if (start_fast_feed and
+                if (not has_slowed_down and
                     (self.reactor.monotonic() - start_fast_feed) >= (self.controller.toolchange_feed_length // self.controller.feed_speed)):
                     logging.info('ToolCommands: Slowing feed speed for precision')
                     self._set_feeding_speed(tool, self.controller.toolhead_homing_speed)
-                    start_fast_feed = 0  # Only slow down once
+                    has_slowed_down = True  # Only slow down once
 
                 # Timeout check - if feeding takes too long, assume failure
                 elapsed = self.reactor.monotonic() - start_fast_feed
