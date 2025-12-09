@@ -942,7 +942,9 @@ class ToolCommands:
 
             # ACE firmware needs additional time after response to fully deactivate feed assist (legacy: 300ms)
             # Critical: FORBIDDEN errors occur if we feed too quickly after disabling
+            logging.info(f'ToolCommands: Starting 300ms dwell after disabling feed assist for tool {tool}')
             self.controller.reactor.pause(self.controller.reactor.monotonic() + 0.3)
+            logging.info(f'ToolCommands: Completed 300ms dwell after disabling feed assist for tool {tool}')
 
             logging.info(f'ToolCommands: Disabled feed assist for tool {tool}')
 
