@@ -439,17 +439,19 @@ class AceDevice:
         """Check if device is ready to accept commands"""
         return self._info['status'] == 'ready'
 
-    def wait_gate_ready(self, local_gate: int, timeout: float = 30.0):
+    def wait_gate_ready(self, local_gate: int, timeout: float = 30.0, stability_time: float = 1.0):
         """
-        Wait for specific gate to become ready.
+        Wait for specific gate to become ready with stability check.
 
         This is more accurate than wait_ready() for determining when motors
-        have physically completed movement, as the ACE firmware updates per-gate
-        status in the 'slots' array to reflect actual motor state.
+        have physically completed movement. Uses state transition tracking to
+        prevent false positives when gate briefly transitions through 'ready'
+        during multi-state operations (e.g., unwinding → ready → shifting → empty).
 
         Args:
             local_gate: Local gate number (0-3) on this device
             timeout: Maximum time to wait in seconds
+            stability_time: Time gate must remain stable in idle state (default: 0.5s)
 
         Raises:
             AceException: If gate doesn't become ready within timeout
@@ -459,24 +461,52 @@ class AceDevice:
         if local_gate < 0 or local_gate >= self.num_gates:
             raise AceException(f"Invalid local gate {local_gate} (valid: 0-{self.num_gates-1})")
 
+        # Define gate states
+        BUSY_STATES = ['feeding', 'unwinding', 'shifting', 'preload', 'loading', 'unloading']
+        IDLE_STATES = ['ready', 'loaded', 'empty']
+
         start_time = self.reactor.monotonic()
         last_status = None
+        seen_busy = False
+        ready_since = None  # When did we first see ready/empty state
 
         while True:
             # Check gate-specific status from slots array
             slots = self._info.get('slots', [])
             if local_gate < len(slots):
-                gate_status = slots[local_gate].get('status', 'unknown')
+                gate_status = slots[local_gate].get('status', 'unknown').lower()
 
                 # Log status changes for debugging
                 if gate_status != last_status:
                     logging.debug(f"AceDevice {self.device_id}: Gate {local_gate} status: {last_status} -> {gate_status}")
                     last_status = gate_status
 
-                # Gate is ready when status is 'ready' or 'empty' (both idle states)
-                if gate_status in ['ready', 'empty']:
-                    logging.debug(f"AceDevice {self.device_id}: Gate {local_gate} is ready (status: {gate_status})")
-                    return
+                    # Reset stability timer on any status change
+                    if ready_since is not None:
+                        logging.debug(f"AceDevice {self.device_id}: Gate {local_gate} status changed, resetting stability timer")
+                        ready_since = None
+
+                # Track if we've seen the operation start
+                if gate_status in BUSY_STATES:
+                    seen_busy = True
+                    ready_since = None  # Reset if we transition back to busy
+
+                # Check for idle state
+                if gate_status in IDLE_STATES:
+                    # Start stability timer if not already started
+                    if ready_since is None:
+                        ready_since = self.reactor.monotonic()
+                        logging.debug(f"AceDevice {self.device_id}: Gate {local_gate} entered idle state ({gate_status}), starting stability timer")
+
+                    # Check if stable for required duration
+                    stable_duration = self.reactor.monotonic() - ready_since
+                    if stable_duration >= stability_time:
+                        # Only return if we've either:
+                        # 1. Seen a busy state (operation started and completed)
+                        # 2. OR never went busy in first 1 second (was already idle)
+                        if seen_busy or (self.reactor.monotonic() - start_time) > 1.0:
+                            logging.debug(f"AceDevice {self.device_id}: Gate {local_gate} stable in {gate_status} for {stable_duration:.2f}s, returning")
+                            return
 
             # Timeout check
             elapsed = self.reactor.monotonic() - start_time
@@ -484,7 +514,7 @@ class AceDevice:
                 current_status = slots[local_gate].get('status', 'unknown') if local_gate < len(slots) else 'unknown'
                 raise AceException(
                     f"Device {self.device_id} gate {local_gate} did not become ready within {timeout}s "
-                    f"(current status: {current_status})"
+                    f"(current status: {current_status}, seen_busy: {seen_busy})"
                 )
 
             # Pause reactor before next check
