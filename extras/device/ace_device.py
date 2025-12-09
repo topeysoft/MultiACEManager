@@ -565,9 +565,6 @@ class AceDevice:
         """
         Start feed assist for specified gate.
 
-        Note: Includes 700ms delay to ensure ACE firmware fully processes the state change.
-        This matches legacy behavior and prevents FORBIDDEN errors.
-
         Args:
             gate: Gate number (0-3)
             callback: Callback function(response)
@@ -579,30 +576,20 @@ class AceDevice:
             request={"method": "start_feed_assist", "params": {"index": gate}},
             callback=callback)
 
-        # ACE firmware needs time to fully activate feed assist (legacy: 700ms)
-        self._dwell(0.7)
-
     def stop_feed_assist(self, gate: int, callback: Callable):
         """
         Stop feed assist for specified gate.
-
-        Note: Includes 300ms delay to ensure ACE firmware fully processes the state change.
-        This matches legacy behavior and prevents FORBIDDEN errors when feeding from another
-        gate on the same device immediately after.
 
         Args:
             gate: Gate number (0-3)
             callback: Callback function(response)
         """
         if gate < 0 or gate >= self.num_gates:
-            raise AceException(f"Invalid gate {gate} (valid: 0-{self.num_gates-1})")
+            raise AceException(f"Invalid gate {gate} (valid: 0-{self:num_gates-1})")
 
         self.send_request(
             request={"method": "stop_feed_assist", "params": {"index": gate}},
             callback=callback)
-
-        # ACE firmware needs time to fully deactivate feed assist (legacy: 300ms)
-        self._dwell(0.3)
 
     def stop_feeding(self, gate: int, callback: Callable):
         """

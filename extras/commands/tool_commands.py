@@ -904,7 +904,9 @@ class ToolCommands:
 
             device.start_feed_assist(local_gate, callback)
             device.wait_ready()  # Wait for command to complete
-            # Note: device.start_feed_assist() includes internal 700ms delay
+
+            # ACE firmware needs additional time after response to fully activate feed assist (legacy: 700ms)
+            self.controller.reactor.pause(self.controller.reactor.monotonic() + 0.7)
 
             logging.info(f'ToolCommands: Enabled feed assist for tool {tool}')
 
@@ -937,7 +939,10 @@ class ToolCommands:
 
             device.stop_feed_assist(local_gate, callback)
             device.wait_ready()  # Wait for command to complete
-            # Note: device.stop_feed_assist() includes internal 300ms delay
+
+            # ACE firmware needs additional time after response to fully deactivate feed assist (legacy: 300ms)
+            # Critical: FORBIDDEN errors occur if we feed too quickly after disabling
+            self.controller.reactor.pause(self.controller.reactor.monotonic() + 0.3)
 
             logging.info(f'ToolCommands: Disabled feed assist for tool {tool}')
 
