@@ -90,6 +90,12 @@ class ToolCommands:
             self.gcode.respond_info(f'ACE: Already on tool {tool}')
             return
 
+        # Check if currently selected tool is valid (might be stale after device disconnect)
+        if was >= self.device_manager.total_gates:
+            error_msg = f'Current tool T{was} is out of range (only {self.device_manager.total_gates} gates available). Run ACE_SCAN_DEVICES or ACE_CLEAR_SELECTION first.'
+            logging.error(f'ToolCommands: {error_msg}')
+            raise gcmd.error(error_msg)
+
         logging.info(f'ToolCommands: ========================================')
         logging.info(f'ToolCommands: TOOL CHANGE START: {was} => {tool}')
         logging.info(f'ToolCommands: Feed assist states before change: {self.controller.gate_feed_assist}')
@@ -898,6 +904,8 @@ class ToolCommands:
 
             device.start_feed_assist(local_gate, callback)
             device.wait_ready()  # Wait for command to complete
+            # Note: device.start_feed_assist() includes internal 700ms delay
+
             logging.info(f'ToolCommands: Enabled feed assist for tool {tool}')
 
         except ValueError as e:
@@ -929,6 +937,8 @@ class ToolCommands:
 
             device.stop_feed_assist(local_gate, callback)
             device.wait_ready()  # Wait for command to complete
+            # Note: device.stop_feed_assist() includes internal 300ms delay
+
             logging.info(f'ToolCommands: Disabled feed assist for tool {tool}')
 
         except ValueError as e:
