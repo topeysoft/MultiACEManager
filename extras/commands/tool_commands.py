@@ -937,14 +937,17 @@ class ToolCommands:
                         # Already False, but set it anyway for clarity
                         self.controller.gate_feed_assist[tool] = False
 
+            logging.info(f'ToolCommands: Sending stop_feed_assist for tool {tool} (device {device.device_id}, local gate {local_gate})')
             device.stop_feed_assist(local_gate, callback)
             device.wait_ready()  # Wait for command to complete
+            logging.info(f'ToolCommands: Device ready after stop_feed_assist')
 
-            # ACE firmware needs additional time after response to fully deactivate feed assist (legacy: 300ms)
+            # ACE firmware needs additional time after response to fully deactivate feed assist
             # Critical: FORBIDDEN errors occur if we feed too quickly after disabling
-            logging.info(f'ToolCommands: Starting 300ms dwell after disabling feed assist for tool {tool}')
-            self.controller.reactor.pause(self.controller.reactor.monotonic() + 0.3)
-            logging.info(f'ToolCommands: Completed 300ms dwell after disabling feed assist for tool {tool}')
+            # Increased from legacy 300ms to 1000ms to ensure firmware fully processes state change
+            logging.info(f'ToolCommands: Starting 1000ms dwell after disabling feed assist for tool {tool}')
+            self.controller.reactor.pause(self.controller.reactor.monotonic() + 1.0)
+            logging.info(f'ToolCommands: Completed 1000ms dwell after disabling feed assist for tool {tool}')
 
             logging.info(f'ToolCommands: Disabled feed assist for tool {tool}')
 
