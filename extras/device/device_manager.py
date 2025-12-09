@@ -563,31 +563,50 @@ class AceDeviceManager:
 
     def wait_all_devices_ready(self, timeout: float = 30.0):
         """
-        Wait for all ACE devices to become ready (idle).
+        Wait for all ACE devices and all their gates to become ready (idle).
 
         This is critical for preventing race conditions during tool changes
         where one device might start feeding while another is still retracting.
+
+        Waits for both:
+        1. Device-level status to be 'ready'
+        2. All gate-level statuses to be 'ready' or 'empty'
 
         Args:
             timeout: Maximum time to wait in seconds (default: 30s)
 
         Raises:
-            Exception: If any device doesn't become ready within timeout
+            Exception: If any device or gate doesn't become ready within timeout
         """
-        import time
-        start_time = time.time()
+        start_time = self.reactor.monotonic()
 
         for device_info in self.ace_devices:
             device = device_info['instance']
-            remaining_timeout = timeout - (time.time() - start_time)
+            device_id = device.device_id
+
+            # Check remaining timeout
+            elapsed = self.reactor.monotonic() - start_time
+            remaining_timeout = timeout - elapsed
 
             if remaining_timeout <= 0:
                 raise Exception(f"Timeout waiting for all devices to become ready")
 
-            # Wait for this device to be ready
+            # Wait for device-level status
+            logging.debug(f"AceDeviceManager: Waiting for device {device_id} to be ready...")
             device.wait_ready(timeout=remaining_timeout)
 
-        logging.debug(f"AceDeviceManager: All {len(self.ace_devices)} devices are ready")
+            # Wait for all gates on this device to be ready
+            for local_gate in range(device.num_gates):
+                elapsed = self.reactor.monotonic() - start_time
+                remaining_timeout = timeout - elapsed
+
+                if remaining_timeout <= 0:
+                    raise Exception(f"Timeout waiting for all gates to become ready")
+
+                logging.debug(f"AceDeviceManager: Waiting for device {device_id} gate {local_gate} to be ready...")
+                device.wait_gate_ready(local_gate, timeout=remaining_timeout)
+
+        logging.debug(f"AceDeviceManager: All {len(self.ace_devices)} devices and {self.total_gates} gates are ready")
 
     @property
     def devices(self):

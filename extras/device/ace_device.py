@@ -439,6 +439,58 @@ class AceDevice:
         """Check if device is ready to accept commands"""
         return self._info['status'] == 'ready'
 
+    def wait_gate_ready(self, local_gate: int, timeout: float = 30.0):
+        """
+        Wait for specific gate to become ready.
+
+        This is more accurate than wait_ready() for determining when motors
+        have physically completed movement, as the ACE firmware updates per-gate
+        status in the 'slots' array to reflect actual motor state.
+
+        Args:
+            local_gate: Local gate number (0-3) on this device
+            timeout: Maximum time to wait in seconds
+
+        Raises:
+            AceException: If gate doesn't become ready within timeout
+        """
+        from ..exceptions import AceException
+
+        if local_gate < 0 or local_gate >= self.num_gates:
+            raise AceException(f"Invalid local gate {local_gate} (valid: 0-{self.num_gates-1})")
+
+        start_time = self.reactor.monotonic()
+        last_status = None
+
+        while True:
+            # Check gate-specific status from slots array
+            slots = self._info.get('slots', [])
+            if local_gate < len(slots):
+                gate_status = slots[local_gate].get('status', 'unknown')
+
+                # Log status changes for debugging
+                if gate_status != last_status:
+                    logging.debug(f"AceDevice {self.device_id}: Gate {local_gate} status: {last_status} -> {gate_status}")
+                    last_status = gate_status
+
+                # Gate is ready when status is 'ready' or 'empty' (both idle states)
+                if gate_status in ['ready', 'empty']:
+                    logging.debug(f"AceDevice {self.device_id}: Gate {local_gate} is ready (status: {gate_status})")
+                    return
+
+            # Timeout check
+            elapsed = self.reactor.monotonic() - start_time
+            if elapsed > timeout:
+                current_status = slots[local_gate].get('status', 'unknown') if local_gate < len(slots) else 'unknown'
+                raise AceException(
+                    f"Device {self.device_id} gate {local_gate} did not become ready within {timeout}s "
+                    f"(current status: {current_status})"
+                )
+
+            # Pause reactor before next check
+            currTs = self.reactor.monotonic()
+            self.reactor.pause(currTs + 0.2)  # Poll every 200ms
+
     def _get_adaptive_poll_interval(self):
         """
         Get adaptive polling interval based on activity state.

@@ -546,7 +546,13 @@ class ToolCommands:
             speed = self.controller.retract_speed
 
             device.retract(local_gate, length, speed, callback)
-            device.wait_ready()
+
+            # Wait for this specific gate to complete movement
+            # Using per-gate status is more accurate than device-level status
+            # because ACE firmware updates gate status when motors actually stop
+            logging.info(f'ToolCommands: Waiting for gate {tool} (local {local_gate}) to complete retract...')
+            device.wait_gate_ready(local_gate, timeout=30.0)
+            logging.info(f'ToolCommands: Gate {tool} retract complete')
 
         except ValueError as e:
             logging.error(f'ToolCommands: Failed to retract to gate: {e}')
