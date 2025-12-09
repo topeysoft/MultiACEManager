@@ -142,18 +142,26 @@ class ToolCommands:
                 self._unload_tool(was)
                 logging.info(f'ToolCommands: Unload complete. Feed assist states: {self.controller.gate_feed_assist}')
 
+                # Ensure ALL devices are idle before starting load
+                # This prevents cross-device race conditions where one device starts feeding
+                # while another is still retracting
+                logging.info('ToolCommands: Waiting for all ACE devices to become idle...')
+                self.device_manager.wait_all_devices_ready()
+                logging.info('ToolCommands: All ACE devices idle')
+
                 # ACE firmware needs additional time to reset motor controller when
                 # switching between gates on same device
-                try:
-                    old_device, _ = self.device_manager.get_device_for_gate(was)
-                    new_device, _ = self.device_manager.get_device_for_gate(tool)
+                if tool != -1:
+                    try:
+                        old_device, _ = self.device_manager.get_device_for_gate(was)
+                        new_device, _ = self.device_manager.get_device_for_gate(tool)
 
-                    if old_device.device_id == new_device.device_id:
-                        logging.info(f'ToolCommands: Same-device tool change detected, adding firmware stabilization delay')
-                        self.dwell(delay=1.0)  # Firmware needs ~1s to fully reset motor controller
-                        new_device.wait_ready()  # Verify device still ready after delay
-                except ValueError as e:
-                    logging.warning(f'ToolCommands: Could not verify device match: {e}')
+                        if old_device.device_id == new_device.device_id:
+                            logging.info(f'ToolCommands: Same-device tool change detected, adding firmware stabilization delay')
+                            self.dwell(delay=1.0)  # Firmware needs ~1s to fully reset motor controller
+                            new_device.wait_ready()  # Verify device still ready after delay
+                    except ValueError as e:
+                        logging.warning(f'ToolCommands: Could not verify device match: {e}')
 
             logging.info(f'ToolCommands: Starting load of tool {tool}')
             self._load_tool(tool)

@@ -560,3 +560,41 @@ class AceDeviceManager:
         except Exception as e:
             logging.warning(f"AceDeviceManager: Error in polling interval calculation: {e}")
             return 5.0  # Failsafe
+
+    def wait_all_devices_ready(self, timeout: float = 30.0):
+        """
+        Wait for all ACE devices to become ready (idle).
+
+        This is critical for preventing race conditions during tool changes
+        where one device might start feeding while another is still retracting.
+
+        Args:
+            timeout: Maximum time to wait in seconds (default: 30s)
+
+        Raises:
+            Exception: If any device doesn't become ready within timeout
+        """
+        import time
+        start_time = time.time()
+
+        for device_info in self.ace_devices:
+            device = device_info['instance']
+            remaining_timeout = timeout - (time.time() - start_time)
+
+            if remaining_timeout <= 0:
+                raise Exception(f"Timeout waiting for all devices to become ready")
+
+            # Wait for this device to be ready
+            device.wait_ready(timeout=remaining_timeout)
+
+        logging.debug(f"AceDeviceManager: All {len(self.ace_devices)} devices are ready")
+
+    @property
+    def devices(self):
+        """
+        Get list of all AceDevice instances.
+
+        Returns:
+            List of AceDevice instances
+        """
+        return [dev['instance'] for dev in self.ace_devices]
