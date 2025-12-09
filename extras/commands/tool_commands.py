@@ -897,6 +897,7 @@ class ToolCommands:
                         self.controller.gate_feed_assist[tool] = True
 
             device.start_feed_assist(local_gate, callback)
+            device.wait_ready()  # Wait for command to complete
             logging.info(f'ToolCommands: Enabled feed assist for tool {tool}')
 
         except ValueError as e:
@@ -927,6 +928,7 @@ class ToolCommands:
                         self.controller.gate_feed_assist[tool] = False
 
             device.stop_feed_assist(local_gate, callback)
+            device.wait_ready()  # Wait for command to complete
             logging.info(f'ToolCommands: Disabled feed assist for tool {tool}')
 
         except ValueError as e:
