@@ -439,7 +439,7 @@ class AceDevice:
         """Check if device is ready to accept commands"""
         return self._info['status'] == 'ready'
 
-    def wait_gate_ready(self, local_gate: int, timeout: float = 30.0, stability_time: float = 0.5):
+    def wait_gate_ready(self, local_gate: int, timeout: float = 30.0, stability_time: float = 0.2):
         """
         Wait for specific gate to become ready with stability check.
 
