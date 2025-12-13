@@ -74,12 +74,14 @@ class ToolCommands:
 
     def cmd_ACE_CHANGE_TOOL(self, gcmd):
         """
-        ACE_CHANGE_TOOL TOOL=<n>
+        ACE_CHANGE_TOOL TOOL=<n> [SKIP_PREHEAT=0|1]
 
         Change to specified tool (gate).
         Use TOOL=-1 to unload.
+        Optional SKIP_PREHEAT=1 to disable automatic pre-heating for this change.
         """
         tool = gcmd.get_int('TOOL')
+        skip_preheat = gcmd.get_int('SKIP_PREHEAT', 0) == 1
 
         if tool < -1 or tool >= self.device_manager.total_gates:
             raise gcmd.error(f'Invalid tool (valid: -1 or 0-{self.device_manager.total_gates-1})')
@@ -164,7 +166,7 @@ class ToolCommands:
                         logging.warning(f'ToolCommands: Could not verify device match: {e}')
 
             logging.info(f'ToolCommands: Starting load of tool {tool}')
-            self._load_tool(tool)
+            self._load_tool(tool, skip_preheat=skip_preheat)
             logging.info(f'ToolCommands: Load complete. Feed assist states: {self.controller.gate_feed_assist}')
 
         # Execute post-toolchange macro
@@ -239,7 +241,7 @@ class ToolCommands:
         logging.info(f'ToolCommands: Unload tool {tool} complete')
         self.gcode.respond_info('ACE: Unload complete')
 
-    def _load_tool(self, tool):
+    def _load_tool(self, tool, skip_preheat=False):
         """
         Load filament for specified tool.
 
@@ -249,6 +251,7 @@ class ToolCommands:
 
         Args:
             tool: Tool (gate) number to load
+            skip_preheat: If True, skip automatic temperature pre-heating
         """
         self.gcode.respond_info(f'ACE: Loading tool {tool}...')
 
@@ -271,7 +274,10 @@ class ToolCommands:
             self.gcode.respond_info('ACE: Feeding to nozzle (single sensor mode)')
             self._feed_extruder_to_nozzle()
 
-        # 4. Prime/purge
+        # 4. Ensure correct temperature before purging
+        self._ensure_temperature(tool, skip_preheat=skip_preheat)
+
+        # 5. Prime/purge
         if self.controller.poop_macros:
             self.gcode.respond_info(f'ACE: Executing poop macro: {self.controller.poop_macros}')
             try:
@@ -827,6 +833,93 @@ class ToolCommands:
         """
         curr_time = self.reactor.monotonic()
         self.reactor.pause(curr_time + delay)
+
+    def _ensure_temperature(self, tool, skip_preheat=False):
+        """
+        Ensure extruder is at correct temperature for tool before purging.
+
+        Checks if current temperature is significantly lower than target gate temperature.
+        If delta > threshold and heater is not actively heating, pre-heat to target temp.
+
+        Args:
+            tool: Tool (gate) number to check temperature for
+            skip_preheat: If True, skip pre-heating even if needed (for manual override)
+
+        Returns:
+            bool: True if temperature is ready, False if skipped
+        """
+        # Skip if feature is disabled or manual override
+        if not self.controller.enable_temp_preheat or skip_preheat:
+            return True
+
+        # Get target temperature for this gate
+        gate_temps = self.save_variables.allVariables.get('ace_gate_temp', [230] * self.device_manager.total_gates)
+        if tool < 0 or tool >= len(gate_temps):
+            logging.warning(f'ToolCommands: Invalid tool {tool} for temperature check')
+            return True
+
+        target_temp = gate_temps[tool]
+
+        # Get current extruder temperature and state
+        try:
+            extruder = self.controller.printer.lookup_object('extruder')
+            current_temp = extruder.get_status(self.reactor.monotonic())['temperature']
+            target_set = extruder.get_status(self.reactor.monotonic())['target']
+
+            # Calculate temperature delta
+            temp_delta = target_temp - current_temp
+            threshold = self.controller.temp_preheat_threshold
+
+            logging.info(f'ToolCommands: Temperature check for T{tool}:')
+            logging.info(f'  Current: {current_temp:.1f}°C, Target: {target_temp}°C, Delta: {temp_delta:.1f}°C')
+            logging.info(f'  Heater target: {target_set:.1f}°C, Threshold: {threshold}°C')
+
+            # Check if we need to pre-heat
+            # Heat if: delta > threshold AND heater is not already actively heating to correct temp
+            heater_active = abs(target_set - target_temp) < 5  # Within 5°C means already heating to correct temp
+
+            if temp_delta > threshold and not heater_active:
+                # Get gate material for better user messaging
+                gate_materials = self.save_variables.allVariables.get('ace_gate_type', [''] * self.device_manager.total_gates)
+                material = gate_materials[tool] if tool < len(gate_materials) else 'Unknown'
+
+                self.gcode.respond_info(f'ACE: Temperature mismatch detected')
+                self.gcode.respond_info(f'ACE: Current: {current_temp:.1f}°C, Target: {target_temp}°C ({material})')
+                self.gcode.respond_info(f'ACE: Pre-heating extruder to {target_temp}°C...')
+                logging.info(f'ToolCommands: Pre-heating extruder from {current_temp:.1f}°C to {target_temp}°C for {material}')
+
+                # Set target temperature
+                self.gcode.run_script_from_command(f'M104 S{target_temp}')
+
+                # Wait for temperature with progress updates
+                self.gcode.run_script_from_command(f'TEMPERATURE_WAIT SENSOR=extruder MINIMUM={target_temp}')
+
+                # Stabilize time to ensure consistent temperature
+                stabilize_time = self.controller.temp_stabilize_time
+                if stabilize_time > 0:
+                    self.gcode.respond_info(f'ACE: Temperature reached, stabilizing for {stabilize_time:.1f}s...')
+                    logging.info(f'ToolCommands: Stabilizing temperature for {stabilize_time}s')
+                    self.dwell(stabilize_time)
+
+                self.gcode.respond_info(f'ACE: Extruder ready at {target_temp}°C')
+                logging.info(f'ToolCommands: Pre-heating complete')
+                return True
+
+            elif temp_delta > threshold and heater_active:
+                # Heater is already heating to correct temp, just wait for it
+                self.gcode.respond_info(f'ACE: Waiting for extruder to reach {target_temp}°C...')
+                self.gcode.run_script_from_command(f'TEMPERATURE_WAIT SENSOR=extruder MINIMUM={target_temp}')
+                return True
+
+            else:
+                # Temperature is already sufficient
+                logging.info(f'ToolCommands: Temperature OK (delta {temp_delta:.1f}°C < threshold {threshold}°C)')
+                return True
+
+        except Exception as e:
+            logging.error(f'ToolCommands: Temperature check failed: {e}')
+            # Don't block tool change on temperature check failure
+            return True
 
     def _feed_fixed_distance(self, tool, length, speed):
         """

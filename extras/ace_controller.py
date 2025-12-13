@@ -76,6 +76,11 @@ class AceController:
         self.connect_retry_max = config.getint('connect_retry_max', 10)
         self.max_dryer_temperature = config.getint('max_dryer_temperature', 55)
 
+        # Temperature management for tool changes
+        self.enable_temp_preheat = config.getboolean('enable_temp_preheat', True)
+        self.temp_preheat_threshold = config.getint('temp_preheat_threshold', 20)
+        self.temp_stabilize_time = config.getfloat('temp_stabilize_time', 3.0)
+
         # Logging configuration
         log_level_str = config.get('log_level', 'INFO').upper()
         log_level = getattr(logging, log_level_str, logging.INFO)
