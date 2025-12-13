@@ -259,23 +259,23 @@ class ToolCommands:
         self.gcode.respond_info('ACE: Feeding from gate to extruder')
         self._feed_to_extruder(tool)
 
+        # 2. Ensure correct temperature BEFORE feeding to nozzle (prevents extrude-below-temp errors)
+        self._ensure_temperature(tool, skip_preheat=skip_preheat)
+
         # Check if we have a toolhead sensor
         if self.controller.toolhead_sensor is not None:
             # Dual sensor configuration: feed extruder→toolhead→nozzle
-            # 2. Feed from extruder to toolhead sensor
+            # 3. Feed from extruder to toolhead sensor
             self.gcode.respond_info('ACE: Feeding to toolhead sensor')
             self._feed_to_toolhead(tool)
 
-            # 3. Feed from toolhead sensor to nozzle
+            # 4. Feed from toolhead sensor to nozzle
             self.gcode.respond_info('ACE: Feeding to nozzle')
             self._feed_to_nozzle()
         else:
             # Single sensor configuration: feed extruder→nozzle in one step
             self.gcode.respond_info('ACE: Feeding to nozzle (single sensor mode)')
             self._feed_extruder_to_nozzle()
-
-        # 4. Ensure correct temperature before purging
-        self._ensure_temperature(tool, skip_preheat=skip_preheat)
 
         # 5. Prime/purge
         if self.controller.poop_macros:
