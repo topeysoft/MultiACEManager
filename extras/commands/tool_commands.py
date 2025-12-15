@@ -225,11 +225,16 @@ class ToolCommands:
 
             # Retract in 20mm increments until sensor clears
             while self._check_sensor(self.controller.extruder_sensor):
-                # Extruder motor pushes back
+                # ACE starts pulling first (queues command and begins movement)
+                device.retract(local_gate, 20, self.controller.retract_speed, retract_callback)
+
+                # Small delay to let ACE start moving before extruder joins
+                self.dwell(delay=0.1)
+
+                # Extruder motor joins in pulling (both now retracting together)
                 self._extruder_move(-20, self.controller.extruder_move_speed)
 
-                # ACE pulls simultaneously
-                device.retract(local_gate, 20, self.controller.retract_speed, retract_callback)
+                # Wait for ACE to complete its movement
                 device.wait_ready()
 
             logging.info('ToolCommands: Extruder sensor cleared')
