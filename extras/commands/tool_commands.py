@@ -223,18 +223,20 @@ class ToolCommands:
                 if 'code' in response and response['code'] != 0:
                     logging.error(f"ACE retract error: {response.get('msg', 'Unknown error')}")
 
-            # Retract in 20mm increments until sensor clears
+            # Retract in 20mm increments until sensor clears (matches legacy BunnyACE line 817-820)
             while self._check_sensor(self.controller.extruder_sensor):
-                # ACE starts pulling first (queues command and begins movement)
-                device.retract(local_gate, 20, self.controller.retract_speed, retract_callback)
-
-                # Small delay to let ACE start moving before extruder joins
-                self.dwell(delay=0.1)
-
-                # Extruder motor joins in pulling (both now retracting together)
+                # Extruder motor moves first (matches legacy line 818)
                 self._extruder_move(-20, self.controller.extruder_move_speed)
 
-                # Wait for ACE to complete its movement
+                # ACE pulls (matches legacy line 819)
+                device.retract(local_gate, 20, self.controller.retract_speed, retract_callback)
+
+                # Block for expected movement duration to match legacy _retract() behavior
+                # Legacy blocks for: (length / speed) + 0.1
+                expected_duration = (20 / self.controller.retract_speed) + 0.1
+                self.dwell(delay=expected_duration)
+
+                # Ensure ACE completed movement (matches legacy line 820)
                 device.wait_ready()
 
             logging.info('ToolCommands: Extruder sensor cleared')
