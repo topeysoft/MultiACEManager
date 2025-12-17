@@ -61,6 +61,7 @@ class AceController:
         self.toolchange_feed_length = config.getint('toolchange_feed_length', 100)
         self.toolchange_retract_for_cut = config.getint('toolchange_retract_for_cut', 5)  # Small retract before tip cut to prevent oozing
         self.sensor_overshoot_compensation = config.getint('sensor_overshoot_compensation', 0)  # Retract after sensor triggers to compensate for overshoot (0 = disabled)
+        self.extruder_clearance_length = config.getint('extruder_clearance_length', 20)  # Distance required to clear filament from extruder during unload
         self.toolhead_homing_max = config.getint('toolhead_homing_max', 100)
         self.toolhead_homing_speed = config.getint('toolhead_homing_speed', 10)
         self.extruder_move_speed = config.getint('extruder_move_speed', 10)

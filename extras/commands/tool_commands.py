@@ -179,14 +179,83 @@ class ToolCommands:
         self.controller.current_tool = tool
         self.controller.save_variable('ace_current_index', tool, True)
 
+    def _sequential_retract_to_clear_sensor(self, tool, device, local_gate):
+        """
+        Sequential retraction strategy to clear extruder sensor.
+
+        Instead of synchronized extruder+ACE retraction, this method uses a sequential approach:
+        1. Extruder retracts by configured clearance length, waits for completion
+        2. ACE gently pulls 10mm to test if sensor cleared
+        3. If sensor clear → success, proceed to full retract
+        4. If sensor NOT clear → retry from step 1
+
+        Args:
+            tool: Tool (gate) number
+            device: ACE device object
+            local_gate: Local gate number on device
+
+        Raises:
+            AceException: If sensor doesn't clear after max retries
+        """
+        max_retries = 5
+        clearance_length = self.controller.extruder_clearance_length
+        test_pull_length = 10  # Gentle pull to test sensor
+
+        for retry in range(max_retries):
+            logging.info(f'ToolCommands: Sequential retract attempt {retry + 1}/{max_retries}')
+
+            # Step 1: Extruder retract only, wait for completion
+            logging.info(f'ToolCommands: Step 1 - Extruder retracting {clearance_length}mm')
+            self._extruder_move(-clearance_length, self.controller.extruder_move_speed)
+
+            # Wait for extruder move to complete
+            self.controller.toolhead.wait_moves()
+            logging.info('ToolCommands: Extruder retract complete')
+
+            # Step 2: ACE gentle pull to test sensor
+            logging.info(f'ToolCommands: Step 2 - ACE gentle pull {test_pull_length}mm to test sensor')
+
+            def retract_callback(response):
+                if 'code' in response and response['code'] != 0:
+                    logging.error(f"ACE retract error: {response.get('msg', 'Unknown error')}")
+
+            device.retract(local_gate, test_pull_length, self.controller.retract_speed, retract_callback)
+
+            # Wait for ACE movement
+            expected_duration = (test_pull_length / self.controller.retract_speed) + 0.1
+            self.dwell(delay=expected_duration)
+            device.wait_ready()
+
+            # Step 3: Check if sensor cleared
+            sensor_clear = not self._check_sensor(self.controller.extruder_sensor)
+            logging.info(f'ToolCommands: Step 3 - Sensor clear: {sensor_clear}')
+
+            if sensor_clear:
+                logging.info('ToolCommands: Extruder sensor cleared successfully')
+                return  # Success!
+            else:
+                logging.warning(f'ToolCommands: Sensor still triggered, retry {retry + 1}/{max_retries}')
+
+        # Max retries exceeded
+        error_msg = f'ACE Error: Failed to clear extruder sensor after {max_retries} attempts'
+        logging.error(f'ToolCommands: {error_msg}')
+
+        if self.controller.error_macros:
+            try:
+                self.gcode.run_script_from_command(f"{self.controller.error_macros} TOOL={tool} ERROR='EXTRUDER_SENSOR_NOT_CLEAR'")
+            except Exception as e:
+                logging.error(f'ToolCommands: Error macro failed: {e}')
+
+        raise AceException(error_msg)
+
     def _unload_tool(self, tool):
         """
         Unload filament from specified tool.
 
-        Sequence (matches BunnyACE):
+        Sequence:
         1. Disable feed assist for old tool
         2. Tip cutting (at nozzle)
-        3. Synchronized retract until extruder sensor clears (extruder + ACE together)
+        3. Sequential retract until extruder sensor clears (extruder then ACE, with retry)
         4. Full retract to gate
 
         Args:
@@ -213,32 +282,12 @@ class ToolCommands:
             except Exception as e:
                 logging.warning(f'ToolCommands: Cut macro failed: {e}')
 
-        # 3. Synchronized retract until extruder sensor clears
-        # Extruder motor pushes back while ACE pulls - work together in 20mm increments
+        # 3. Sequential retract until extruder sensor clears
+        # Extruder retracts first, then ACE pulls gently to test, with retry logic
         extruder_has_filament = self._check_sensor(self.controller.extruder_sensor)
         if extruder_has_filament:
-            self.gcode.respond_info('ACE: Retracting to extruder sensor (synchronized)')
-
-            def retract_callback(response):
-                if 'code' in response and response['code'] != 0:
-                    logging.error(f"ACE retract error: {response.get('msg', 'Unknown error')}")
-
-            # Retract in 20mm increments until sensor clears (matches legacy BunnyACE line 817-820)
-            while self._check_sensor(self.controller.extruder_sensor):
-                # Extruder motor moves first (matches legacy line 818)
-                self._extruder_move(-20, self.controller.extruder_move_speed)
-
-                # ACE pulls (matches legacy line 819)
-                device.retract(local_gate, 20, self.controller.retract_speed, retract_callback)
-
-                # Block for expected movement duration to match legacy _retract() behavior
-                # Legacy blocks for: (length / speed) + 0.1
-                expected_duration = (20 / self.controller.retract_speed) + 0.1
-                self.dwell(delay=expected_duration)
-
-                # Ensure ACE completed movement (matches legacy line 820)
-                device.wait_ready()
-
+            self.gcode.respond_info('ACE: Retracting to clear extruder sensor (sequential)')
+            self._sequential_retract_to_clear_sensor(tool, device, local_gate)
             logging.info('ToolCommands: Extruder sensor cleared')
 
         # 4. Full retract to gate
