@@ -6,9 +6,11 @@ Commands:
 - ACE_SCAN_DEVICES - Scan for ACE devices
 - ACE_LIST_DEVICES - List connected devices
 - ACE_SHOW_USB_INFO - Show USB topology
+- ACE_DEBUG - Send raw commands to ACE devices
 """
 
 import logging
+import json
 from ..device import AceDeviceDiscovery
 
 
@@ -50,7 +52,11 @@ class StatusCommands:
             'ACE_SHOW_USB_INFO', self.cmd_ACE_SHOW_USB_INFO,
             desc='Show USB topology and device mapping')
 
-        logging.info("StatusCommands: Registered 4 diagnostic commands")
+        self.gcode.register_command(
+            'ACE_DEBUG', self.cmd_ACE_DEBUG,
+            desc='Send raw JSON-RPC commands to ACE device')
+
+        logging.info("StatusCommands: Registered 5 diagnostic commands")
 
     def cmd_ACE_GET_STATUS(self, gcmd):
         """
@@ -533,3 +539,93 @@ class StatusCommands:
             import traceback
             logging.error(traceback.format_exc())
             raise gcmd.error(f'Failed to show USB info: {e}')
+
+    def cmd_ACE_DEBUG(self, gcmd):
+        """
+        ACE_DEBUG METHOD=<method_name> [PARAMS=<json_params>] [DEVICE=<device_id_or_index>]
+
+        Send raw JSON-RPC commands to ACE device for testing and discovery.
+
+        Options:
+            METHOD - JSON-RPC method name (required)
+            PARAMS - JSON-encoded parameters (optional, default: {})
+            DEVICE - Target device by index or ID (optional, default: device 0)
+
+        Examples:
+            ACE_DEBUG METHOD=get_status
+            ACE_DEBUG METHOD=get_info
+            ACE_DEBUG METHOD=get_diagnostics
+            ACE_DEBUG METHOD=feed PARAMS='{"index":0,"len":50,"speed":50}'
+            ACE_DEBUG METHOD=get_status DEVICE=1
+
+        This command is useful for discovering undocumented ACE API methods.
+        """
+        method = gcmd.get('METHOD', None)
+        if not method:
+            raise gcmd.error('METHOD parameter is required')
+
+        params_str = gcmd.get('PARAMS', '{}')
+        device_param = gcmd.get('DEVICE', None)
+
+        # Parse parameters
+        try:
+            params = json.loads(params_str)
+        except json.JSONDecodeError as e:
+            raise gcmd.error(f'Invalid JSON in PARAMS: {e}')
+
+        # Resolve device (default to device 0)
+        device_index = 0
+        if device_param is not None:
+            try:
+                device_index = int(device_param)
+            except ValueError:
+                # Try resolving as device_id or alias
+                if hasattr(self.device_manager, 'device_mapper'):
+                    device_id = self.device_manager.device_mapper.resolve_device_id(device_param)
+                    if not device_id:
+                        raise gcmd.error(f'Device "{device_param}" not found')
+
+                    # Find index
+                    status = self.device_manager.get_aggregated_status()
+                    for i, dev in enumerate(status['devices']):
+                        if dev.get('device_id') == device_id:
+                            device_index = i
+                            break
+                    else:
+                        raise gcmd.error(f'Device "{device_param}" not connected')
+                else:
+                    raise gcmd.error(f'Cannot resolve device "{device_param}"')
+
+        # Get device
+        if device_index < 0 or device_index >= len(self.device_manager.ace_devices):
+            raise gcmd.error(f'Invalid device index: {device_index}')
+
+        device_info = self.device_manager.ace_devices[device_index]
+        device = device_info['instance']
+
+        if not device._connected:
+            raise gcmd.error(f'Device {device_index} ({device_info["name"]}) is not connected')
+
+        # Send command
+        self.gcode.respond_info(f'Sending to {device_info["name"]}: {method}')
+        if params:
+            self.gcode.respond_info(f'Parameters: {json.dumps(params)}')
+
+        try:
+            response = device.send_command(method, params if params else None)
+
+            if response:
+                # Pretty print response
+                formatted = json.dumps(response, indent=2)
+                self.gcode.respond_info('=== ACE Response ===')
+                for line in formatted.split('\n'):
+                    self.gcode.respond_info(line)
+                self.gcode.respond_info('====================')
+            else:
+                self.gcode.respond_info('No response received (timeout or error)')
+
+        except Exception as e:
+            logging.error(f'ACE_DEBUG error: {e}')
+            import traceback
+            logging.error(traceback.format_exc())
+            raise gcmd.error(f'Command failed: {e}')

@@ -265,6 +265,10 @@ class BunnyAce:
             desc=self.cmd_ACE_ENDLESS_SPOOL_help
         )
         self.gcode.register_command(
+            'ACE_DEBUG', self.cmd_ACE_DEBUG,
+            desc=self.cmd_ACE_DEBUG_help
+        )
+        self.gcode.register_command(
             'ACE_ENABLE_DEBUG', self.cmd_ACE_ENABLE_DEBUG,
             desc=self.cmd_ACE_ENABLE_DEBUG_help
         )
