@@ -186,8 +186,14 @@ class ToolCommands:
         Instead of synchronized extruder+ACE retraction, this method uses a sequential approach:
         1. Extruder retracts by configured clearance length, waits for completion
         2. ACE gently pulls 10mm to test if sensor cleared
-        3. If sensor clear → success, proceed to full retract
+        3. If sensor clear → success, return
         4. If sensor NOT clear → retry from step 1
+
+        IMPORTANT: This method ONLY clears the sensor. After this completes,
+        _retract_to_gate() must be called to pull the full toolchange_retract_length
+        to ensure filament clears the splitter.
+
+        Total ACE retraction = (this method's pulls) + toolchange_retract_length
 
         Args:
             tool: Tool (gate) number
@@ -290,7 +296,9 @@ class ToolCommands:
             self._sequential_retract_to_clear_sensor(tool, device, local_gate)
             logging.info('ToolCommands: Extruder sensor cleared')
 
-        # 4. Full retract to gate
+        # 4. Full retract to gate (splitter)
+        # ACE pulls the full toolchange_retract_length distance from extruder sensor to splitter
+        # This is ADDITIONAL to any pulls done during sensor clearing
         self.gcode.respond_info('ACE: Retracting to gate')
         self._retract_to_gate(tool)
 

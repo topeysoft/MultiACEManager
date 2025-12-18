@@ -264,6 +264,17 @@ class BunnyAce:
             'ACE_ENDLESS_SPOOL', self.cmd_ACE_ENDLESS_SPOOL,
             desc=self.cmd_ACE_ENDLESS_SPOOL_help
         )
+        self.gcode.register_command(
+            'ACE_ENABLE_DEBUG', self.cmd_ACE_ENABLE_DEBUG,
+            desc=self.cmd_ACE_ENABLE_DEBUG_help
+        )
+        self.gcode.register_command(
+            'ACE_DISABLE_DEBUG', self.cmd_ACE_DISABLE_DEBUG,
+            desc=self.cmd_ACE_DISABLE_DEBUG_help
+        )
+
+        # Debug mode for enhanced logging
+        self._debug_mode = False
 
     def _handle_ready(self):
         self.toolhead = self.printer.lookup_object('toolhead')
@@ -461,6 +472,11 @@ class BunnyAce:
             self.gcode.respond_info('Invalid data from ACE PRO (CRC)')
 
         ret = json.loads(payload.decode('utf-8'))
+
+        # Enhanced logging: Log all response fields for discovery
+        if self._debug_mode:
+            logging.info(f"ACE Response: {json.dumps(ret, indent=2)}")
+
         id = ret['id']
         if id in self._callback_map:
             callback = self._callback_map.pop(id)
@@ -881,11 +897,31 @@ class BunnyAce:
 
         try:
             def callback(self, response):
-                self.gcode.respond_info(str(response))
+                # Enhanced logging: pretty print JSON response
+                if response:
+                    formatted = json.dumps(response, indent=2)
+                    self.gcode.respond_info("=== ACE Response ===")
+                    for line in formatted.split('\n'):
+                        self.gcode.respond_info(line)
+                    self.gcode.respond_info("====================")
+                else:
+                    self.gcode.respond_info("No response received")
 
             self.send_request(request={"method": method, "params": json.loads(params)}, callback=callback)
         except Exception as e:
             self.gcode.respond_info('Error: ' + str(e))
+
+    cmd_ACE_ENABLE_DEBUG_help = 'Enable verbose ACE protocol logging'
+
+    def cmd_ACE_ENABLE_DEBUG(self, gcmd):
+        self._debug_mode = True
+        self.gcode.respond_info("ACE debug mode enabled - all responses will be logged")
+
+    cmd_ACE_DISABLE_DEBUG_help = 'Disable verbose ACE protocol logging'
+
+    def cmd_ACE_DISABLE_DEBUG(self, gcmd):
+        self._debug_mode = False
+        self.gcode.respond_info("ACE debug mode disabled")
 
     def get_status(self, eventtime=None):
         # Get user-configured values as defaults
