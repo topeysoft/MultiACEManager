@@ -612,13 +612,14 @@ class StatusCommands:
             self.gcode.respond_info(f'Parameters: {json.dumps(params)}')
 
         try:
-            # Use a threading event to wait for response
-            import threading
-            response_container = {'response': None, 'received': threading.Event()}
+            # Store response in closure
+            response_data = {'response': None}
 
             def callback(response):
-                response_container['response'] = response
-                response_container['received'].set()
+                # Store response for display
+                response_data['response'] = response
+                if response and 'code' in response and response['code'] != 0:
+                    logging.warning(f"ACE_DEBUG: Command returned error code {response['code']}: {response.get('msg', 'Unknown')}")
 
             # Build request
             request = {"method": method}
@@ -628,22 +629,23 @@ class StatusCommands:
             # Send request
             device.send_request(request, callback)
 
-            # Wait for response (with timeout)
-            timeout = 5.0  # 5 second timeout
-            if response_container['received'].wait(timeout):
-                response = response_container['response']
+            # Wait for device to process and become ready again
+            # For non-blocking commands (like get_status), this returns quickly
+            # For blocking commands (like feed), this waits for completion
+            device.wait_ready(timeout=10.0)
 
-                if response:
-                    # Pretty print response
-                    formatted = json.dumps(response, indent=2)
-                    self.gcode.respond_info('=== ACE Response ===')
-                    for line in formatted.split('\n'):
-                        self.gcode.respond_info(line)
-                    self.gcode.respond_info('====================')
-                else:
-                    self.gcode.respond_info('No response received')
+            # Display response if captured
+            if response_data['response']:
+                response = response_data['response']
+
+                # Pretty print response
+                formatted = json.dumps(response, indent=2)
+                self.gcode.respond_info('=== ACE Response ===')
+                for line in formatted.split('\n'):
+                    self.gcode.respond_info(line)
+                self.gcode.respond_info('====================')
             else:
-                self.gcode.respond_info(f'Timeout: No response after {timeout}s')
+                self.gcode.respond_info('Command sent (no response captured - check klippy.log)')
 
         except Exception as e:
             logging.error(f'ACE_DEBUG error: {e}')
