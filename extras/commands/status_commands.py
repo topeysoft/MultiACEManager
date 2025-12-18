@@ -612,17 +612,38 @@ class StatusCommands:
             self.gcode.respond_info(f'Parameters: {json.dumps(params)}')
 
         try:
-            response = device.send_command(method, params if params else None)
+            # Use a threading event to wait for response
+            import threading
+            response_container = {'response': None, 'received': threading.Event()}
 
-            if response:
-                # Pretty print response
-                formatted = json.dumps(response, indent=2)
-                self.gcode.respond_info('=== ACE Response ===')
-                for line in formatted.split('\n'):
-                    self.gcode.respond_info(line)
-                self.gcode.respond_info('====================')
+            def callback(response):
+                response_container['response'] = response
+                response_container['received'].set()
+
+            # Build request
+            request = {"method": method}
+            if params:
+                request["params"] = params
+
+            # Send request
+            device.send_request(request, callback)
+
+            # Wait for response (with timeout)
+            timeout = 5.0  # 5 second timeout
+            if response_container['received'].wait(timeout):
+                response = response_container['response']
+
+                if response:
+                    # Pretty print response
+                    formatted = json.dumps(response, indent=2)
+                    self.gcode.respond_info('=== ACE Response ===')
+                    for line in formatted.split('\n'):
+                        self.gcode.respond_info(line)
+                    self.gcode.respond_info('====================')
+                else:
+                    self.gcode.respond_info('No response received')
             else:
-                self.gcode.respond_info('No response received (timeout or error)')
+                self.gcode.respond_info(f'Timeout: No response after {timeout}s')
 
         except Exception as e:
             logging.error(f'ACE_DEBUG error: {e}')
