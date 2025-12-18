@@ -612,31 +612,44 @@ class StatusCommands:
             self.gcode.respond_info(f'Parameters: {json.dumps(params)}')
 
         try:
-            # Store response in closure
-            response_data = {'response': None}
+            # Store response in list (mutable, so closure works correctly)
+            response_data = [None]
 
             def callback(response):
                 # Store response for display
-                response_data['response'] = response
-                if response and 'code' in response and response['code'] != 0:
-                    logging.warning(f"ACE_DEBUG: Command returned error code {response['code']}: {response.get('msg', 'Unknown')}")
+                logging.info(f"ACE_DEBUG: Callback invoked with response")
+                response_data[0] = response
+                if response:
+                    logging.debug(f"ACE_DEBUG: Response data: {json.dumps(response, indent=2)}")
+                    if 'code' in response and response['code'] != 0:
+                        logging.warning(f"ACE_DEBUG: Command returned error code {response['code']}: {response.get('msg', 'Unknown')}")
 
             # Build request
             request = {"method": method}
             if params:
                 request["params"] = params
 
+            logging.info(f"ACE_DEBUG: Sending request: {json.dumps(request)}")
+
             # Send request
             device.send_request(request, callback)
+
+            # Give a moment for the request to be sent and response to arrive
+            # The device processes IO in its timer callback
+            eventtime = self.controller.reactor.monotonic()
+            self.controller.reactor.pause(eventtime + 0.5)
 
             # Wait for device to process and become ready again
             # For non-blocking commands (like get_status), this returns quickly
             # For blocking commands (like feed), this waits for completion
-            device.wait_ready(timeout=10.0)
+            try:
+                device.wait_ready(timeout=10.0)
+            except Exception as wait_error:
+                logging.warning(f"ACE_DEBUG: wait_ready failed: {wait_error}")
 
             # Display response if captured
-            if response_data['response']:
-                response = response_data['response']
+            if response_data[0]:
+                response = response_data[0]
 
                 # Pretty print response
                 formatted = json.dumps(response, indent=2)
@@ -645,7 +658,8 @@ class StatusCommands:
                     self.gcode.respond_info(line)
                 self.gcode.respond_info('====================')
             else:
-                self.gcode.respond_info('Command sent (no response captured - check klippy.log)')
+                self.gcode.respond_info('Command sent (no response captured - check klippy.log for details)')
+                logging.warning("ACE_DEBUG: No response captured in callback")
 
         except Exception as e:
             logging.error(f'ACE_DEBUG error: {e}')
