@@ -221,14 +221,18 @@ class ToolCommands:
             logging.info('ToolCommands: Extruder retract complete')
 
             # Step 2: ACE continuous pull at low speed while monitoring sensor
-            logging.info(f'ToolCommands: Step 2 - ACE continuous pull at {sensor_clear_speed}mm/s (max {max_pull_distance}mm), monitoring sensor')
+            logging.info(f'ToolCommands: Step 2 - ACE continuous RETRACT (pull back) at {sensor_clear_speed}mm/s (max {max_pull_distance}mm), monitoring sensor')
+            logging.info(f'ToolCommands: Calling device.retract() which sends unwind_filament command to ACE firmware')
 
             def retract_callback(response):
                 if 'code' in response and response['code'] != 0:
                     logging.error(f"ACE retract error: {response.get('msg', 'Unknown error')}")
+                else:
+                    logging.info(f"ToolCommands: ACE retract command accepted: {response}")
 
             # Start continuous ACE pull (like _feed_to_extruder pattern)
             start_time = self.reactor.monotonic()
+            logging.info(f'ToolCommands: Sending retract command: gate={local_gate}, length={max_pull_distance}mm, speed={sensor_clear_speed}mm/s')
             device.retract(local_gate, max_pull_distance, sensor_clear_speed, retract_callback)
 
             # Small dwell to let command start
@@ -242,7 +246,8 @@ class ToolCommands:
                 # Check if sensor cleared
                 if not self._check_sensor(self.controller.extruder_sensor):
                     sensor_cleared = True
-                    logging.info('ToolCommands: Sensor cleared! Stopping ACE pull')
+                    logging.info('ToolCommands: Sensor cleared! Stopping ACE retract')
+                    # Note: _stop_feeding sends stop_feed_filament which stops all motor operations (feed/retract)
                     self._stop_feeding(tool)
                     break
 
@@ -260,9 +265,11 @@ class ToolCommands:
 
             if sensor_cleared:
                 logging.info('ToolCommands: Extruder sensor cleared successfully')
+                self.gcode.respond_info(f'ACE: Sensor cleared on attempt {retry + 1}/{max_retries}')
                 return  # Success!
             else:
                 logging.warning(f'ToolCommands: Sensor still triggered after {max_pull_distance}mm pull, retry {retry + 1}/{max_retries}')
+                self.gcode.respond_info(f'ACE: Sensor still triggered, retry {retry + 1}/{max_retries}...')
 
         # Max retries exceeded
         error_msg = f'ACE Error: Failed to clear extruder sensor after {max_retries} attempts'
@@ -321,8 +328,10 @@ class ToolCommands:
         # 4. Full retract to gate (splitter)
         # ACE pulls the full toolchange_retract_length distance from extruder sensor to splitter
         # This is ADDITIONAL to any pulls done during sensor clearing
-        self.gcode.respond_info('ACE: Retracting to gate')
+        logging.info(f'ToolCommands: Step 4 - Starting full retract to gate ({self.controller.toolchange_retract_length}mm)')
+        self.gcode.respond_info(f'ACE: Retracting to gate ({self.controller.toolchange_retract_length}mm)')
         self._retract_to_gate(tool)
+        logging.info('ToolCommands: Step 4 - Full retract to gate complete')
 
         logging.info(f'ToolCommands: Unload tool {tool} complete')
         self.gcode.respond_info('ACE: Unload complete')
