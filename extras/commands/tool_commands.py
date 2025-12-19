@@ -183,11 +183,12 @@ class ToolCommands:
         """
         Sequential retraction strategy to clear extruder sensor.
 
-        Instead of synchronized extruder+ACE retraction, this method uses a sequential approach:
-        1. Extruder retracts by configured clearance length, waits for completion
-        2. ACE gently pulls 10mm to test if sensor cleared
-        3. If sensor clear → success, return
-        4. If sensor NOT clear → retry from step 1
+        Sequential approach with continuous ACE pull and sensor monitoring:
+        1. Extruder retracts by extruder_clearance_length, waits for completion
+        2. ACE starts continuous pull at low speed (sensor_clear_speed) for up to sensor_clear_max_distance
+           - Monitor sensor in tight loop while ACE is pulling
+           - Stop immediately when sensor clears
+        3. If sensor doesn't clear after max distance → retry from step 1
 
         IMPORTANT: This method ONLY clears the sensor. After this completes,
         _retract_to_gate() must be called to pull the full toolchange_retract_length
@@ -205,7 +206,8 @@ class ToolCommands:
         """
         max_retries = 5
         clearance_length = self.controller.extruder_clearance_length
-        test_pull_length = 10  # Gentle pull to test sensor
+        sensor_clear_speed = self.controller.sensor_clear_speed
+        max_pull_distance = self.controller.sensor_clear_max_distance
 
         for retry in range(max_retries):
             logging.info(f'ToolCommands: Sequential retract attempt {retry + 1}/{max_retries}')
@@ -218,29 +220,49 @@ class ToolCommands:
             self.controller.toolhead.wait_moves()
             logging.info('ToolCommands: Extruder retract complete')
 
-            # Step 2: ACE gentle pull to test sensor
-            logging.info(f'ToolCommands: Step 2 - ACE gentle pull {test_pull_length}mm to test sensor')
+            # Step 2: ACE continuous pull at low speed while monitoring sensor
+            logging.info(f'ToolCommands: Step 2 - ACE continuous pull at {sensor_clear_speed}mm/s (max {max_pull_distance}mm), monitoring sensor')
 
             def retract_callback(response):
                 if 'code' in response and response['code'] != 0:
                     logging.error(f"ACE retract error: {response.get('msg', 'Unknown error')}")
 
-            device.retract(local_gate, test_pull_length, self.controller.retract_speed, retract_callback)
+            # Start continuous ACE pull (like _feed_to_extruder pattern)
+            start_time = self.reactor.monotonic()
+            device.retract(local_gate, max_pull_distance, sensor_clear_speed, retract_callback)
 
-            # Wait for ACE movement
-            expected_duration = (test_pull_length / self.controller.retract_speed) + 0.1
-            self.dwell(delay=expected_duration)
+            # Small dwell to let command start
+            self.dwell(delay=0.1)
+
+            # Monitor sensor while ACE is pulling
+            max_pull_time = (max_pull_distance / sensor_clear_speed) * 2.0  # 2x safety margin
+            sensor_cleared = False
+
+            while True:
+                # Check if sensor cleared
+                if not self._check_sensor(self.controller.extruder_sensor):
+                    sensor_cleared = True
+                    logging.info('ToolCommands: Sensor cleared! Stopping ACE pull')
+                    self._stop_feeding(tool)
+                    break
+
+                # Check timeout
+                elapsed = self.reactor.monotonic() - start_time
+                if elapsed > max_pull_time:
+                    logging.info(f'ToolCommands: ACE completed {max_pull_distance}mm pull, sensor still triggered')
+                    break
+
+                # Poll delay
+                self.dwell(delay=0.01)
+
+            # Wait for ACE to finish stopping
             device.wait_ready()
 
-            # Step 3: Check if sensor cleared
-            sensor_clear = not self._check_sensor(self.controller.extruder_sensor)
-            logging.info(f'ToolCommands: Step 3 - Sensor clear: {sensor_clear}')
-
-            if sensor_clear:
+            if sensor_cleared:
                 logging.info('ToolCommands: Extruder sensor cleared successfully')
                 return  # Success!
             else:
-                logging.warning(f'ToolCommands: Sensor still triggered, retry {retry + 1}/{max_retries}')
+                logging.warning(f'ToolCommands: Sensor still triggered after {max_pull_distance}mm pull, retry {retry + 1}/{max_retries}')
 
         # Max retries exceeded
         error_msg = f'ACE Error: Failed to clear extruder sensor after {max_retries} attempts'
