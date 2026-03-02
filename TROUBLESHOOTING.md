@@ -195,6 +195,53 @@ serial_ports: /dev/ttyACM0, /dev/ttyACM1, /dev/ttyACM2
 
 ---
 
+## Feed Timeout During Tool Change
+
+**Symptoms**: Print pauses during tool change, console shows "Toolhead sensor not triggered" or feed timeout message.
+
+**Quick Fix**:
+
+1. Check filament path for tangles or obstructions
+2. Run `ACE_RETRY_FEED` to retry (up to 3 attempts), or `ACE_CANCEL_FEED` to abort
+
+**Diagnostic commands**:
+
+```gcode
+ACE_GET_STATUS VERBOSE=1
+QUERY_FILAMENT_SENSOR SENSOR=extruder_sensor
+```
+
+See [FEED_RECOVERY_GUIDE.md](./FEED_RECOVERY_GUIDE.md) for the full recovery workflow.
+
+---
+
+## Temperature Mismatch During Tool Change
+
+**Symptoms**: Tool change takes longer than expected, console shows "Pre-heating extruder" message.
+
+**Explanation**: KlipperACE auto-preheats the extruder when switching to a gate with a different target temperature. This is controlled by:
+
+- `enable_temp_preheat` (default: `true`)
+- `temp_preheat_threshold` (default: `20` — delta in C that triggers preheat)
+- `temp_stabilize_time` (default: `3.0` seconds wait after reaching temp)
+
+**Quick Fixes**:
+
+```gcode
+# Skip preheat for a single tool change:
+ACE_CHANGE_TOOL TOOL=2 SKIP_PREHEAT=1
+```
+
+```ini
+# Disable auto-preheat globally (in printer.cfg):
+[ace]
+enable_temp_preheat: false
+```
+
+See [CONFIGURATION_REFERENCE.md](./CONFIGURATION_REFERENCE.md) for all temperature parameters.
+
+---
+
 ## Runtime Issues
 
 ### WebSocket Connection Errors
@@ -438,4 +485,4 @@ When something isn't working, try this checklist:
 
 ---
 
-**Last Updated**: November 26, 2025
+**Last Updated**: February 26, 2026

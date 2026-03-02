@@ -85,10 +85,19 @@ ls -la /dev/ttyACM*
 ### Testing
 ```gcode
 ACE_GET_STATUS              # Show all gates
+ACE_GET_STATUS VERBOSE=1    # Show gate colors/materials/temps
 ACE_CHANGE_TOOL TOOL=0      # Load gate 0
 ACE_CHANGE_TOOL TOOL=-1     # Unload current
 T0                          # Quick load gate 0
 T4                          # Quick load gate 4 (ACE 2)
+ACE_SET_GATE GATE=2         # Mark gate 2 as selected (manual load)
+ACE_CLEAR_SELECTION         # Clear gate selection (manual unload)
+ACE_SCAN_DEVICES VERBOSE=1  # Scan USB for ACE devices
+ACE_LIST_DEVICES            # List connected devices
+ACE_LIST_ALIASES            # Show device aliases
+ACE_GET_DRYER_STATUS        # Show all dryer statuses
+ACE_RETRY_FEED              # Retry after feed timeout
+ACE_CANCEL_FEED             # Cancel after feed timeout
 ```
 
 ### Debugging
@@ -184,11 +193,14 @@ sudo systemctl restart klipper
 
 | Document | Purpose | Read Time |
 |----------|---------|-----------|
-| **SIMPLE_CONFIG_GUIDE.md** | Start here! | 5 min |
-| **QUICKSTART_DUAL_ACE.md** | Dual ACE setup | 10 min |
-| **MULTI_ACE_SETUP.md** | Complete reference | 20 min |
-| **DEBUGGING_CHAINING.md** | Troubleshooting | 10 min |
-| **README.md** | Overview | 15 min |
+| **[README.md](./README.md)** | Overview + Quick Start | 15 min |
+| **[CONFIGURATION_REFERENCE.md](./CONFIGURATION_REFERENCE.md)** | All config parameters | 10 min |
+| **[FEED_RECOVERY_GUIDE.md](./FEED_RECOVERY_GUIDE.md)** | Feed timeout recovery | 5 min |
+| **[TROUBLESHOOTING.md](./TROUBLESHOOTING.md)** | Common issues & fixes | 10 min |
+| **[DEVICE_ALIASING_GUIDE.md](./DEVICE_ALIASING_GUIDE.md)** | Friendly device naming | 5 min |
+| **[DRYER_CONTROL_GUIDE.md](./DRYER_CONTROL_GUIDE.md)** | Per-device dryer control | 10 min |
+| **[USB_PORT_MAPPING_GUIDE.md](./USB_PORT_MAPPING_GUIDE.md)** | USB device identification | 10 min |
+| **[MOONRAKER-INTEGRATION.md](./MOONRAKER-INTEGRATION.md)** | REST API reference | 10 min |
 
 ## 🎨 Example Workflows
 
@@ -298,5 +310,5 @@ gcode: ACE_CHANGE_TOOL TOOL=7
 
 ---
 
-**Last Updated:** 2025-11-26
+**Last Updated:** 2026-02-26
 **For:** KlipperACE v2.0+ with multi-ACE support

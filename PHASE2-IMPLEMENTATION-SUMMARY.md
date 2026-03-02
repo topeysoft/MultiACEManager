@@ -10,7 +10,7 @@ Phase 2 implementation adds comprehensive multi-device management capabilities t
 
 ## ✅ Completed Components
 
-### 1. Backend Enhancements ([BunnyACE/extras/ace.py](extras/ace.py))
+### 1. Backend Enhancements ([KlipperACE/extras/ace.py](extras/ace.py))
 
 #### New Methods in AceManager Class
 
@@ -238,6 +238,219 @@ sudo systemctl restart moonraker
 ```
 
 See [MOONRAKER-INTEGRATION.md](MOONRAKER-INTEGRATION.md) for complete installation and usage guide.
+
+---
+
+## 🔥 Hot-Plug Device Enumeration (Phase 2.1)
+
+**Implementation Date**: November 27, 2025
+**Status**: ✅ Complete
+
+### Overview
+Added runtime hot-plug support for ACE devices, allowing dynamic reconfiguration without Klipper restart. Users can now add, remove, or swap devices and apply changes on-the-fly.
+
+### New Backend Methods
+
+**`_reenumerate_devices()` (Line ~2511)**
+- Shared enumeration logic for both boot-time and runtime discovery
+- Scans USB ports for ACE devices using `AceDeviceDiscovery.find_ace_devices()`
+- Probes and verifies each device
+- Sorts devices by USB location (deterministic ordering)
+- Calculates new gate offsets (continuous: 0-3, 4-7, 8-11...)
+- Compares with current configuration
+- Returns detailed enumeration plan with:
+  - `added`: New devices to add
+  - `removed`: Missing devices to remove
+  - `reordered`: Devices with changed gate offsets
+  - `unchanged`: Devices staying the same
+  - `gate_offset_map`: New gate offset assignments
+
+**`_check_enumeration_safety()` (Line ~2637)**
+- Safety checks before applying hot-reload
+- Verifies printer is not currently printing
+- Checks for filament at extruder sensor
+- Checks for filament at toolhead sensor
+- Checks for active gates
+- Returns `(is_safe, reason)` tuple
+
+**`_apply_device_enumeration(enum_plan)` (Line ~2692)**
+- Applies enumeration plan and performs hot-reload
+- Safely shuts down current ACE instances
+- Closes serial connections
+- Creates new ACE instances from discovered devices
+- Updates total gates count
+- Updates device mapper with new configuration
+- Migrates device properties to new instances
+- Saves device map
+- Returns result with old/new device counts
+
+**Enhanced `cmd_ACE_SCAN_DEVICES()` (Line ~3086)**
+- Added `APPLY` parameter (default: 0)
+- Preview mode (default): Shows what changes would be made
+- Apply mode (`APPLY=1`): Runs safety checks and applies changes
+- Detailed change reporting:
+  - ➕ Devices to ADD with USB location and gates
+  - ➖ Devices to REMOVE with previous configuration
+  - 🔄 Devices with CHANGED gate offsets (old → new)
+  - ✓ UNCHANGED devices
+- Shows discovered device configuration
+- Safety check feedback with clear error messages
+- Instructions for both preview and apply modes
+
+**Updated `_setup_auto_detect()` (Line ~1938)**
+- Refactored to use `_reenumerate_devices()`
+- Eliminates code duplication
+- Ensures consistent enumeration behavior between boot and hot-plug
+
+**Enhanced `ACE_SHOW_USB_INFO` (Line ~3254)**
+- Added suggestion to run scan when disconnected devices detected
+- Shows hot-plug support information
+- Clear instructions for preview and apply commands
+
+### Usage Examples
+
+**Preview device changes (safe, recommended first):**
+```gcode
+ACE_SCAN_DEVICES
+```
+
+**Apply device changes (hot-reload without restart):**
+```gcode
+ACE_SCAN_DEVICES APPLY=1
+```
+
+**View USB topology and scan suggestions:**
+```gcode
+ACE_SHOW_USB_INFO
+```
+
+### Example Output
+
+**Preview Mode:**
+```
+======================================================================
+ACE Device Scan & Enumeration
+======================================================================
+Scanning USB ports for ACE devices...
+
+Scan Results:
+  Devices currently configured: 2
+  Devices discovered on USB:    3
+
+⚠ Configuration changes detected:
+
+  ➕ Devices to ADD (1):
+     • hub_1_port_3
+       Port: /dev/ttyACM2
+       USB:  1-1.3
+       Gates: 8-11
+
+  🔄 Devices with CHANGED gate offsets (1):
+     • hub_1_port_2
+       Port: /dev/ttyACM1
+       USB:  1-1.2
+       Gates: 4-7 → 0-3
+
+======================================================================
+ℹ Preview mode - no changes applied
+======================================================================
+
+To apply these changes:
+  Option 1: ACE_SCAN_DEVICES APPLY=1  (hot-reload, no restart)
+  Option 2: RESTART                    (full Klipper restart)
+
+Hot-reload safety requirements:
+  • No active print
+  • All filament unloaded
+```
+
+**Apply Mode (Success):**
+```
+======================================================================
+APPLY=1 detected - Attempting hot-reload...
+======================================================================
+
+✅ Hot-reload SUCCESSFUL!
+   Devices: 2 → 3
+   Gates:   12
+
+Device configuration updated without restart!
+```
+
+**Apply Mode (Safety Check Failed):**
+```
+======================================================================
+APPLY=1 detected - Attempting hot-reload...
+======================================================================
+
+❌ SAFETY CHECK FAILED: Cannot re-enumerate with filament loaded (detected on hub_1_port_1)
+
+Cannot apply changes. Please:
+  1. Ensure no print is active
+  2. Unload all filament
+  3. Try again with ACE_SCAN_DEVICES APPLY=1
+```
+
+### Safety Features
+
+1. **Print State Detection**
+   - Checks `idle_timeout.state` for "Printing"
+   - Checks `print_stats.state` for 'printing' or 'paused'
+   - Prevents hot-reload during active prints
+
+2. **Filament Detection**
+   - Checks extruder sensor state
+   - Checks toolhead sensor state
+   - Checks active gate status
+   - Prevents hot-reload with loaded filament
+
+3. **Preview-First Design**
+   - Default behavior is safe preview mode
+   - Explicit `APPLY=1` required to make changes
+   - Clear error messages with actionable steps
+
+4. **Graceful Degradation**
+   - If hot-reload fails, suggests Klipper restart
+   - Logs detailed error information
+   - Maintains system stability
+
+### Technical Details
+
+**Enumeration Flow:**
+```
+1. Scan USB ports (AceDeviceDiscovery.find_ace_devices())
+2. For each discovered device:
+   - If port is currently connected: Use existing device info
+   - If port is new: Probe device (AceDeviceDiscovery.probe_ace_device())
+3. Sort by USB location (deterministic)
+4. Calculate gate offsets (continuous)
+5. Compare with current config
+6. Generate enumeration plan
+7. (If APPLY=1) Run safety checks
+8. (If safe) Shut down old instances
+9. Create new instances
+10. Migrate device properties
+11. Update device mapper
+```
+
+**Important Notes:**
+- Preview mode works with existing connections (no serial port probing required)
+- Only new devices need to be probed via serial
+- Existing devices use cached info from running ACE instances
+
+**Device Property Migration:**
+- Colors, materials, temperatures follow the physical device
+- Properties stored in `ace_device_map.cfg` keyed by device_id
+- When gate offset changes, properties migrate automatically
+- Ensures user settings persist with the device, not the gate number
+
+### Benefits
+
+- **No Restart Required**: Add/remove/swap devices without downtime
+- **Safe by Default**: Preview mode prevents accidental changes
+- **Property Persistence**: Device settings follow the physical device
+- **Clear Feedback**: Detailed reporting of all changes
+- **Graceful Handling**: Safety checks prevent configuration corruption
 
 ---
 

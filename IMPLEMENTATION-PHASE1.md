@@ -8,7 +8,7 @@ Phase 1 implements zero-configuration auto-discovery and persistent device ident
 ### 1. USB Device Enumeration
 
 #### Implementation Location
-`BunnyACE/extras/ace.py` - New class `AceDeviceDiscovery`
+`KlipperACE/extras/ace.py` - New class `AceDeviceDiscovery`
 
 ```python
 class AceDeviceDiscovery:
@@ -323,7 +323,7 @@ def _setup_auto_detect(self, config):
     # Save updated device map
     self.device_mapper.save()
 
-    # Step 4: Create BunnyAce instances
+    # Step 4: Create KlipperAce instances
     # Sort by gate offset to ensure correct order
     sorted_devices = sorted(known_devices.values(), key=lambda x: x['gate_offset'])
 
@@ -375,7 +375,7 @@ def _handle_connect(self):
 
 ### 5. Connection Loss Handling
 
-#### Enhanced BunnyAce._reader() Error Handling
+#### Enhanced KlipperAce._reader() Error Handling
 ```python
 def _reader(self, eventtime):
     """Reader with enhanced error handling and reconnection"""

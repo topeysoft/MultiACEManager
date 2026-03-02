@@ -123,6 +123,18 @@ class ToolCommands:
             except ValueError as e:
                 logging.error(f'ToolCommands: Failed to check gate status: {e}')
 
+        # Disable feed assist for current tool before pre-toolchange macro
+        if was >= 0:
+            self._disable_feed_assist(was)
+
+            # Wait for feed assist motor to fully stop before proceeding
+            delay = self.controller.feed_assist_disable_delay
+            logging.info(f'ToolCommands: Waiting {delay}s for feed assist motor to stop')
+            self.controller.toolhead.wait_moves()
+            self.gcode.run_script_from_command(f'G4 P{int(delay * 1000)}')
+            self.controller.toolhead.wait_moves()
+            logging.info(f'ToolCommands: Feed assist delay complete')
+
         # Execute pre-toolchange macro
         try:
             self.gcode.run_script_from_command(f'_ACE_PRE_TOOLCHANGE FROM={was} TO={tool}')
@@ -181,20 +193,21 @@ class ToolCommands:
 
     def _sequential_retract_to_clear_sensor(self, tool, device, local_gate):
         """
-        Sequential retraction strategy to clear extruder sensor.
+        Clear extruder sensor using sequential extruder retract + ACE test pull.
 
-        Sequential approach with continuous ACE pull and sensor monitoring:
-        1. Extruder retracts by extruder_clearance_length, waits for completion
-        2. ACE starts continuous pull at low speed (sensor_clear_speed) for up to sensor_clear_max_distance
-           - Monitor sensor in tight loop while ACE is pulling
-           - Stop immediately when sensor clears
-        3. If sensor doesn't clear after max distance → retry from step 1
+        Procedure per attempt:
+          1. Extruder-only retract of extruder_clearance_length (pulls filament
+             back from cutter/nozzle area through extruder gears)
+          2. ACE-only test pull of sensor_clear_max_distance at sensor_clear_speed
+             (gently pulls filament past the extruder sensor)
+          3. Check extruder sensor — if clear, done; if not, retry from step 1
 
-        IMPORTANT: This method ONLY clears the sensor. After this completes,
-        _retract_to_gate() must be called to pull the full toolchange_retract_length
-        to ensure filament clears the splitter.
+        The extruder and ACE motors operate sequentially, never simultaneously.
+        The extruder retract creates slack that allows the ACE to pull the
+        filament tip past the sensor.
 
-        Total ACE retraction = (this method's pulls) + toolchange_retract_length
+        After this completes, _retract_to_gate() must be called to pull
+        the full toolchange_retract_length to clear the splitter.
 
         Args:
             tool: Tool (gate) number
@@ -202,82 +215,55 @@ class ToolCommands:
             local_gate: Local gate number on device
 
         Raises:
-            AceException: If sensor doesn't clear after max retries
+            AceException: If sensor doesn't clear after max attempts
         """
+        extruder_retract_length = self.controller.extruder_clearance_length
+        ace_pull_length = self.controller.extruder_clearance_length
+        ace_pull_speed = self.controller.sensor_clear_speed
+        extruder_speed = self.controller.extruder_move_speed
         max_retries = 5
-        clearance_length = self.controller.extruder_clearance_length
-        sensor_clear_speed = self.controller.sensor_clear_speed
-        max_pull_distance = self.controller.sensor_clear_max_distance
 
-        for retry in range(max_retries):
-            logging.info(f'ToolCommands: Sequential retract attempt {retry + 1}/{max_retries}')
+        for attempt in range(max_retries):
+            logging.info(f'ToolCommands: Sensor clear attempt {attempt + 1}/{max_retries}')
 
-            # Step 1: Extruder retract only, wait for completion
-            logging.info(f'ToolCommands: Step 1 - Extruder retracting {clearance_length}mm')
-            self._extruder_move(-clearance_length, self.controller.extruder_move_speed)
-
-            # Wait for extruder move to complete
+            # Step A: Extruder-only retract to create slack
+            logging.info(f'ToolCommands: Extruder retract {extruder_retract_length}mm at {extruder_speed}mm/s')
+            self._extruder_move(-extruder_retract_length, extruder_speed)
             self.controller.toolhead.wait_moves()
-            logging.info('ToolCommands: Extruder retract complete')
 
-            # Step 2: ACE continuous pull at low speed while monitoring sensor
-            logging.info(f'ToolCommands: Step 2 - ACE continuous RETRACT (pull back) at {sensor_clear_speed}mm/s (max {max_pull_distance}mm), monitoring sensor')
-            logging.info(f'ToolCommands: Calling device.retract() which sends unwind_filament command to ACE firmware')
+            # Step B: ACE-only test pull to check if filament clears sensor
+            logging.info(f'ToolCommands: ACE test pull {ace_pull_length}mm at {ace_pull_speed}mm/s')
 
             def retract_callback(response):
                 if 'code' in response and response['code'] != 0:
                     logging.error(f"ACE retract error: {response.get('msg', 'Unknown error')}")
-                else:
-                    logging.info(f"ToolCommands: ACE retract command accepted: {response}")
 
-            # Start continuous ACE pull (like _feed_to_extruder pattern)
-            start_time = self.reactor.monotonic()
-            logging.info(f'ToolCommands: Sending retract command: gate={local_gate}, length={max_pull_distance}mm, speed={sensor_clear_speed}mm/s')
-            device.retract(local_gate, max_pull_distance, sensor_clear_speed, retract_callback)
+            device.retract(local_gate, ace_pull_length, ace_pull_speed, retract_callback)
 
-            # Small dwell to let command start
-            self.dwell(delay=0.1)
-
-            # Monitor sensor while ACE is pulling
-            max_pull_time = (max_pull_distance / sensor_clear_speed) * 2.0  # 2x safety margin
-            sensor_cleared = False
-
-            while True:
-                # Check if sensor cleared
-                if not self._check_sensor(self.controller.extruder_sensor):
-                    sensor_cleared = True
-                    logging.info('ToolCommands: Sensor cleared! Stopping ACE retract')
-                    # Note: _stop_feeding sends stop_feed_filament which stops all motor operations (feed/retract)
-                    self._stop_feeding(tool)
-                    break
-
-                # Check timeout
-                elapsed = self.reactor.monotonic() - start_time
-                if elapsed > max_pull_time:
-                    logging.info(f'ToolCommands: ACE completed {max_pull_distance}mm pull, sensor still triggered')
-                    break
-
-                # Poll delay
-                self.dwell(delay=0.01)
-
-            # Wait for ACE to finish stopping
+            # Wait for firmware to begin processing, then wait for completion
+            self.reactor.pause(self.reactor.monotonic() + 1.5)
             device.wait_ready()
 
-            if sensor_cleared:
-                logging.info('ToolCommands: Extruder sensor cleared successfully')
-                self.gcode.respond_info(f'ACE: Sensor cleared on attempt {retry + 1}/{max_retries}')
-                return  # Success!
-            else:
-                logging.warning(f'ToolCommands: Sensor still triggered after {max_pull_distance}mm pull, retry {retry + 1}/{max_retries}')
-                self.gcode.respond_info(f'ACE: Sensor still triggered, retry {retry + 1}/{max_retries}...')
+            # Step C: Check if extruder sensor has cleared
+            if not self._check_sensor(self.controller.extruder_sensor):
+                logging.info(f'ToolCommands: Extruder sensor cleared after {attempt + 1} attempt(s)')
+                self.gcode.respond_info(f'ACE: Sensor cleared after {attempt + 1} attempt(s)')
+                return
 
-        # Max retries exceeded
-        error_msg = f'ACE Error: Failed to clear extruder sensor after {max_retries} attempts'
+            logging.info(f'ToolCommands: Sensor still triggered after attempt {attempt + 1}, retrying...')
+            self.gcode.respond_info(f'ACE: Sensor not clear after attempt {attempt + 1}, retrying...')
+
+        # All retries exhausted
+        total_extruder = max_retries * extruder_retract_length
+        total_ace = max_retries * ace_pull_length
+        error_msg = (f'ACE Error: Failed to clear extruder sensor after {max_retries} '
+                     f'attempts (extruder retracted {total_extruder}mm, ACE pulled {total_ace}mm)')
         logging.error(f'ToolCommands: {error_msg}')
 
         if self.controller.error_macros:
             try:
-                self.gcode.run_script_from_command(f"{self.controller.error_macros} TOOL={tool} ERROR='EXTRUDER_SENSOR_NOT_CLEAR'")
+                self.gcode.run_script_from_command(
+                    f"{self.controller.error_macros} TOOL={tool} ERROR='EXTRUDER_SENSOR_NOT_CLEAR'")
             except Exception as e:
                 logging.error(f'ToolCommands: Error macro failed: {e}')
 
@@ -287,19 +273,22 @@ class ToolCommands:
         """
         Unload filament from specified tool.
 
-        Sequence:
-        1. Disable feed assist for old tool
-        2. Tip cutting (at nozzle)
-        3. Sequential retract until extruder sensor clears (extruder then ACE, with retry)
-        4. Full retract to gate
+        Sequence (feed assist is already disabled before this is called):
+        1. Tip cutting at nozzle (cut macro must NOT include extruder retracts)
+        2. Sequential retract until extruder sensor clears (extruder then ACE, with retry)
+        3. Full retract to gate
+
+        Note: Feed assist is disabled in cmd_ACE_CHANGE_TOOL before
+        _ACE_PRE_TOOLCHANGE. All extruder movement is deferred to step 2.
+        The cut macro must only perform the physical cut without retracting
+        the extruder.
 
         Args:
             tool: Tool (gate) number to unload
         """
         self.gcode.respond_info(f'ACE: Unloading tool {tool}...')
 
-        # 1. Disable feed assist for old tool
-        self._disable_feed_assist(tool)
+        # Feed assist already disabled in cmd_ACE_CHANGE_TOOL before _ACE_PRE_TOOLCHANGE
 
         # Wait for ACE device to be ready
         try:
@@ -310,12 +299,16 @@ class ToolCommands:
             raise
 
         # 2. Execute tip cutting (at nozzle position)
+        # Flush motion queue first to ensure no extruder moves are pending
+        self.controller.toolhead.wait_moves()
         if self.controller.cut_macros:
             self.gcode.respond_info(f'ACE: Executing cut macro: {self.controller.cut_macros}')
             try:
                 self.gcode.run_script_from_command(self.controller.cut_macros)
             except Exception as e:
                 logging.warning(f'ToolCommands: Cut macro failed: {e}')
+            # Ensure all cut macro moves are complete before extruder retract
+            self.controller.toolhead.wait_moves()
 
         # 3. Sequential retract until extruder sensor clears
         # Extruder retracts first, then ACE pulls gently to test, with retry logic
@@ -633,30 +626,47 @@ class ToolCommands:
         """
         Retract filament from extruder to gate using ACE device.
 
+        Called after sensor clearing, so filament is already past the
+        extruder gears. ACE-only retract of toolchange_retract_length
+        to clear the splitter.
+
         Args:
             tool: Tool (gate) number
+
+        Raises:
+            AceException: If retract command fails or gate doesn't become ready
         """
-        try:
-            device, local_gate = self.device_manager.get_device_for_gate(tool)
+        device, local_gate = self.device_manager.get_device_for_gate(tool)
 
-            def callback(response):
-                if 'code' in response and response['code'] != 0:
-                    self.gcode.respond_info(f"ACE Error: {response.get('msg', 'Unknown error')}")
+        retract_error = [None]  # Mutable container for callback error capture
 
-            length = self.controller.toolchange_retract_length
-            speed = self.controller.retract_speed
+        def callback(response):
+            if 'code' in response and response['code'] != 0:
+                retract_error[0] = response.get('msg', 'Unknown error')
+                logging.error(f"ACE retract to gate error: {retract_error[0]}")
 
-            device.retract(local_gate, length, speed, callback)
+        length = self.controller.toolchange_retract_length
+        speed = self.controller.retract_speed
 
-            # Wait for this specific gate to complete movement
-            # Using per-gate status is more accurate than device-level status
-            # because ACE firmware updates gate status when motors actually stop
-            logging.info(f'ToolCommands: Waiting for gate {tool} (local {local_gate}) to complete retract...')
-            device.wait_gate_ready(local_gate, timeout=30.0)
-            logging.info(f'ToolCommands: Gate {tool} retract complete')
+        # Ensure ACE is ready before sending retract
+        device.wait_ready()
 
-        except ValueError as e:
-            logging.error(f'ToolCommands: Failed to retract to gate: {e}')
+        logging.info(f'ToolCommands: Sending retract to gate: {length}mm at {speed}mm/s')
+        device.retract(local_gate, length, speed, callback)
+
+        # Wait for firmware to begin processing the retract command.
+        # Without this, wait_gate_ready may see the gate still idle from the
+        # previous operation and return immediately before the motor starts.
+        self.reactor.pause(self.reactor.monotonic() + 1.5)
+
+        # Wait for gate to complete the retract
+        logging.info(f'ToolCommands: Waiting for gate {tool} (local {local_gate}) to complete retract...')
+        device.wait_gate_ready(local_gate, timeout=30.0)
+
+        if retract_error[0]:
+            raise AceException(f'ACE Error: Retract to gate failed: {retract_error[0]}')
+
+        logging.info(f'ToolCommands: Gate {tool} retract complete')
 
     def _feed_to_extruder(self, tool):
         """
@@ -1152,10 +1162,7 @@ class ToolCommands:
             if tool < len(self.controller.gate_feed_assist):
                 self.controller.gate_feed_assist[tool] = False
 
-            # Legacy BunnyACE uses 300ms delay after disable (line 646)
-            logging.info(f'ToolCommands: Starting 300ms dwell after disabling feed assist')
-            self.controller.reactor.pause(self.controller.reactor.monotonic() + 0.3)
-            logging.info(f'ToolCommands: Completed dwell, feed assist disabled for tool {tool}')
+            logging.info(f'ToolCommands: Feed assist disabled for tool {tool}')
 
         except ValueError as e:
             logging.error(f'ToolCommands: Failed to disable feed assist: {e}')

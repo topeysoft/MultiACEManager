@@ -356,8 +356,8 @@ class AceHealthMonitor:
             return 0
         return time.time() - self.metrics['uptime_start']
 
-# Integration into BunnyAce class
-class BunnyAce:
+# Integration into KlipperAce class
+class KlipperAce:
     def __init__(self, config):
         # ... existing code ...
         self.health_monitor = AceHealthMonitor(self)
