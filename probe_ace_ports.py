@@ -147,7 +147,7 @@ def find_all_ace_devices(verbose=False):
 
     return ace_devices
 
-def generate_config(ace_devices, simple=True):
+def generate_config(ace_devices):
     """Generate Klipper configuration for detected ACE devices"""
     if not ace_devices:
         return "# No ACE devices detected"
@@ -166,41 +166,20 @@ def generate_config(ace_devices, simple=True):
 
     config.append("")
 
-    if simple:
-        # Simple config using serial_ports
-        config.append("[ace_manager]")
-        config.append(f"serial_ports: {serial_list}")
-        config.append("")
-        config.append("# Shared configuration for all ACE devices")
-        config.append("extruder_sensor_pin: YOUR_EXTRUDER_SENSOR_PIN  # Update this!")
-        config.append("toolhead_sensor_pin: YOUR_TOOLHEAD_SENSOR_PIN  # Update this! (optional)")
-        config.append("feed_speed: 80")
-        config.append("retract_speed: 80")
-        config.append("toolchange_retract_length: 170  # Distance from splitter to extruder")
-        config.append("toolchange_feed_length: 800")
-        config.append("toolhead_sensor_to_nozzle: 40")
-        config.append("poop_macros: _POOP")
-        config.append("cut_macros: _CUT_TIP")
-        config.append("max_dryer_temperature: 70")
-    else:
-        # Detailed config with individual ACE sections
-        config.append("[ace_manager]")
-        config.append(f"ace_devices: {', '.join(f'ace{i+1}' for i in range(len(ace_devices)))}")
-        config.append("")
-
-        for i, device in enumerate(ace_devices, 1):
-            config.append(f"[ace ace{i}]")
-            config.append(f"serial: {device['port']}")
-            config.append("extruder_sensor_pin: YOUR_EXTRUDER_SENSOR_PIN  # Update this!")
-            config.append("toolhead_sensor_pin: YOUR_TOOLHEAD_SENSOR_PIN  # Update this!")
-            config.append("feed_speed: 80")
-            config.append("retract_speed: 80")
-            config.append("toolchange_retract_length: 170")
-            config.append("toolchange_feed_length: 800")
-            config.append("toolhead_sensor_to_nozzle: 40")
-            config.append("poop_macros: _POOP")
-            config.append("cut_macros: _CUT_TIP")
-            config.append("")
+    config.append("[ace]")
+    config.append(f"serial_ports: {serial_list}")
+    config.append("")
+    config.append("# Shared configuration for all ACE devices")
+    config.append("extruder_sensor_pin: YOUR_EXTRUDER_SENSOR_PIN  # Update this!")
+    config.append("toolhead_sensor_pin: YOUR_TOOLHEAD_SENSOR_PIN  # Update this! (optional)")
+    config.append("feed_speed: 80")
+    config.append("retract_speed: 80")
+    config.append("toolchange_retract_length: 170  # Distance from splitter to extruder")
+    config.append("toolchange_feed_length: 800")
+    config.append("toolhead_sensor_to_nozzle: 40")
+    config.append("poop_macros: _POOP")
+    config.append("cut_macros: _CUT_TIP")
+    config.append("max_dryer_temperature: 70")
 
     # Add T macros
     config.append("")
@@ -249,11 +228,8 @@ Examples:
   # Verbose scan
   python3 probe_ace_ports.py -v
 
-  # Generate simple config
+  # Generate config
   python3 probe_ace_ports.py --generate-config
-
-  # Generate detailed config
-  python3 probe_ace_ports.py --generate-config --detailed
 
   # Scan specific ports
   python3 probe_ace_ports.py /dev/ttyACM0 /dev/ttyACM1
@@ -264,7 +240,7 @@ Examples:
     parser.add_argument('-q', '--quiet', action='store_true', help='Quiet mode (summary only)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
     parser.add_argument('--generate-config', action='store_true', help='Generate Klipper config')
-    parser.add_argument('--detailed', action='store_true', help='Generate detailed config (with separate ACE sections)')
+
 
     args = parser.parse_args()
 
@@ -302,7 +278,7 @@ Examples:
             print("\n" + "=" * 70)
             print("GENERATED CONFIGURATION")
             print("=" * 70 + "\n")
-            print(generate_config(ace_devices, simple=not args.detailed))
+            print(generate_config(ace_devices))
             print("\n" + "=" * 70)
             print("Copy the above configuration to your printer.cfg")
             print("Don't forget to update the sensor pins!")

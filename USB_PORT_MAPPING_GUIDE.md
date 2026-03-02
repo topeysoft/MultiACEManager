@@ -324,37 +324,6 @@ ls -la /dev/serial/by-path/
 ### Q: Can I use KlipperACE on Mac/Windows?
 **A:** No. KlipperACE is designed for Linux only and requires `/dev/serial/by-path/` which is Linux-specific. Mac and Windows don't have equivalent stable path mechanisms that work reliably with USB hubs.
 
-## Migration from Old System
-
-### Old Config (Named Devices)
-```ini
-[ace_manager]
-ace_devices: ace1, ace2, ace3
-
-[ace ace1]
-serial: /dev/ttyACM0
-# ... config ...
-
-[ace ace2]
-serial: /dev/ttyACM1
-# ... config ...
-```
-
-### New Config (Auto-Detect)
-```ini
-[ace_manager]
-auto_detect: true
-# Shared config for all devices
-extruder_sensor_pin: ^EBBCan: PB9
-# ... shared config ...
-```
-
-**Migration is automatic!** Just change the config and restart. The system will:
-1. Detect all ACE devices via USB
-2. Create device IDs based on USB location
-3. Assign gate offsets automatically
-4. Preserve existing filament configurations
-
 ## Technical Notes
 
 ### Stable Device Paths (Linux Only)

@@ -157,7 +157,7 @@ extruder_sensor_pin: PG15
 toolhead_sensor_pin: PG12
 ```
 
-See [ace_manager_example.cfg](ace_manager_example.cfg) for complete configuration examples.
+See [ace.cfg](ace.cfg) for a complete configuration example.
 
 ---
 

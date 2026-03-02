@@ -29,12 +29,3 @@ def load_config(config):
     Returns AceController instance with modular architecture.
     """
     return AceController(config)
-
-
-def load_config_prefix(config):
-    """
-    Klipper entry point for [ace <name>] sections.
-
-    Returns AceController instance with custom name.
-    """
-    return AceController(config)

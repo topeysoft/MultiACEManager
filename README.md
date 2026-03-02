@@ -107,7 +107,8 @@ cd ~/KlipperACE
 - **Physical**: ACE units are daisy-chained for filament path (ACE1 → ACE2 → ACE3...)
 - **USB**: Each ACE creates its own USB device (built-in USB hub)
 - **Communication**: Each ACE reports its own 4 slots independently
-- **KlipperACE Solution**: Use `[ace_manager]` to aggregate multiple ACEs into a unified system
+- **KlipperACE Solution**: Use `[ace]` with `serial_ports` or `auto_detect` to aggregate multiple ACEs into a unified system
+- **Moonraker integration**: `[ace_manager]` provides REST API endpoints for web UIs (Mainsail/Fluidd) — goes in `moonraker.conf`, not `printer.cfg`
 
 ### Quick Setup (5 Minutes - 2 ACEs = 8 Gates)
 
@@ -131,7 +132,7 @@ cd ~/KlipperACE
 #### Method 1: Simple Serial Ports (Recommended)
 
 ```ini
-[ace_manager]
+[ace]
 serial_ports: /dev/ttyACM0, /dev/ttyACM1
 extruder_sensor_pin: ^EBBCan: PB9
 # All shared settings in one place
@@ -140,25 +141,10 @@ extruder_sensor_pin: ^EBBCan: PB9
 #### Method 2: Auto-Detection
 
 ```ini
-[ace_manager]
+[ace]
 auto_detect: true
 extruder_sensor_pin: ^EBBCan: PB9
 # System finds ACE devices automatically
-```
-
-#### Method 3: Named Devices (Advanced)
-
-```ini
-[ace_manager]
-ace_devices: ace1, ace2
-
-[ace ace1]
-serial: /dev/ttyACM0
-# Individual ACE settings
-
-[ace ace2]
-serial: /dev/ttyACM1
-# Individual ACE settings
 ```
 
 ### Supported Configurations
@@ -178,15 +164,28 @@ serial: /dev/ttyACM1
 
 ### Example Configs
 
-- **ace_manager_simple.cfg** - Recommended for most users
-- **ace_manager_example.cfg** - Named device method
-- **ace.cfg** - Single ACE example
+- **ace.cfg** - Recommended for most users (works for single or multi-ACE)
+- **ace_manager_auto_detect.cfg** - Auto-detection method
 
 ### Single ACE vs Multi-ACE
 
-**For single ACE (4 gates)**: Use `[include ace.cfg]` as before
+Both single and multi-ACE setups use the same `[ace]` configuration section. Simply list one or more serial ports:
 
-**For multiple ACEs (8+ gates)**: Use `[ace_manager]` configuration
+**Single ACE (4 gates)**:
+
+```ini
+[ace]
+serial_ports: /dev/ttyACM0
+```
+
+**Multiple ACEs (8+ gates)**:
+
+```ini
+[ace]
+serial_ports: /dev/ttyACM0, /dev/ttyACM1
+```
+
+Alternatively, use `auto_detect: true` to find all connected ACE devices automatically.
 
 ## 🛠️ Configuration (ace.cfg)
 

@@ -22,9 +22,10 @@ sudo systemctl restart klipper
 
 ## 📋 Configuration Cheat Sheet
 
-### Method 1: Simple (Recommended)
+### Method 1: Serial Ports (Recommended)
+
 ```ini
-[ace_manager]
+[ace]
 serial_ports: /dev/ttyACM0, /dev/ttyACM1
 extruder_sensor_pin: ^EBBCan: PB9
 feed_speed: 80
@@ -32,23 +33,9 @@ feed_speed: 80
 
 ### Method 2: Auto-Detect
 ```ini
-[ace_manager]
+[ace]
 auto_detect: true
 extruder_sensor_pin: ^EBBCan: PB9
-```
-
-### Method 3: Named Devices
-```ini
-[ace_manager]
-ace_devices: ace1, ace2
-
-[ace ace1]
-serial: /dev/ttyACM0
-# settings
-
-[ace ace2]
-serial: /dev/ttyACM1
-# settings
 ```
 
 ## 🎯 Gate Number Reference
@@ -56,9 +43,9 @@ serial: /dev/ttyACM1
 | # ACEs | Total Gates | T Commands | Config File |
 |--------|-------------|------------|-------------|
 | 1      | 4           | T0-T3      | ace.cfg |
-| 2      | 8           | T0-T7      | ace_manager_simple.cfg |
-| 3      | 12          | T0-T11     | ace_manager_simple.cfg |
-| 4      | 16          | T0-T15     | ace_manager_simple.cfg |
+| 2      | 8           | T0-T7      | ace.cfg |
+| 3      | 12          | T0-T11     | ace.cfg |
+| 4      | 16          | T0-T15     | ace.cfg |
 
 ### Gate Mapping
 ```
