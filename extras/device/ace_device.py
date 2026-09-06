@@ -667,7 +667,7 @@ class AceDevice:
             callback: Callback function(response)
         """
         if gate < 0 or gate >= self.num_gates:
-            raise AceException(f"Invalid gate {gate} (valid: 0-{self:num_gates-1})")
+            raise AceException(f"Invalid gate {gate} (valid: 0-{self.num_gates-1})")
 
         self.send_request(
             request={"method": "stop_feed_assist", "params": {"index": gate}},

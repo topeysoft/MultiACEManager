@@ -133,6 +133,9 @@ class AcePacket:
         """
         Search for a complete packet in a buffer.
 
+        Frames on the header and the length field, never on the tail byte:
+        a 0xFE inside the length or CRC bytes must not end a packet early.
+
         Args:
             buffer: Accumulated bytes from serial reads
 
@@ -146,14 +149,26 @@ class AcePacket:
             ...     response, error = AcePacket.decode(packet)
             ...     read_buffer = remaining
         """
-        # Look for tail byte (end of packet marker)
-        tail_index = buffer.find(PROTOCOL_TAIL_BYTE)
+        start = buffer.find(PROTOCOL_HEAD_BYTES)
+        if start < 0:
+            # No header yet. Keep a trailing first header byte in case the
+            # second one arrives in the next read; drop everything else.
+            if buffer and buffer[-1] == PROTOCOL_HEAD_BYTES[0]:
+                return None, bytearray(buffer[-1:])
+            return None, bytearray()
 
-        if tail_index >= 0:
-            # Found potential packet - extract it
-            packet = bytes(buffer[:tail_index + 1])
-            remaining = bytearray(buffer[tail_index + 1:])
-            return packet, remaining
+        if start > 0:
+            buffer = bytearray(buffer[start:])
 
-        # No complete packet yet
-        return None, buffer
+        if len(buffer) < 4:
+            return None, buffer
+
+        payload_len = struct.unpack('<H', buffer[2:4])[0]
+        total_len = 4 + payload_len + 2 + 1  # header + len + payload + crc + tail
+
+        if len(buffer) < total_len:
+            return None, buffer
+
+        packet = bytes(buffer[:total_len])
+        remaining = bytearray(buffer[total_len:])
+        return packet, remaining
