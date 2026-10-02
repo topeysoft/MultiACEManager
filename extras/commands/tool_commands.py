@@ -78,14 +78,17 @@ class ToolCommands:
 
     def cmd_ACE_CHANGE_TOOL(self, gcmd):
         """
-        ACE_CHANGE_TOOL TOOL=<n> [SKIP_PREHEAT=0|1]
+        ACE_CHANGE_TOOL TOOL=<n> [SKIP_PREHEAT=0|1] [PURGE=0|1]
 
         Change to specified tool (gate).
         Use TOOL=-1 to unload.
         Optional SKIP_PREHEAT=1 to disable automatic pre-heating for this change.
+        Optional PURGE=0 to skip the purge (poop) macro after loading, e.g. when the new
+        spool is the same colour as the old one. Default 1.
         """
         tool = gcmd.get_int('TOOL')
         skip_preheat = gcmd.get_int('SKIP_PREHEAT', 0) == 1
+        purge = gcmd.get_int('PURGE', 1) != 0
 
         if tool < -1 or tool >= self.device_manager.total_gates:
             raise gcmd.error(f'Invalid tool (valid: -1 or 0-{self.device_manager.total_gates-1})')
@@ -182,7 +185,7 @@ class ToolCommands:
                         logging.warning(f'ToolCommands: Could not verify device match: {e}')
 
             logging.info(f'ToolCommands: Starting load of tool {tool}')
-            self._load_tool(tool, skip_preheat=skip_preheat)
+            self._load_tool(tool, skip_preheat=skip_preheat, purge=purge)
             logging.info(f'ToolCommands: Load complete. Feed assist states: {self.controller.gate_feed_assist}')
 
         # Execute post-toolchange macro
@@ -359,7 +362,7 @@ class ToolCommands:
         logging.info(f'ToolCommands: Unload tool {tool} complete')
         self.gcode.respond_info('ACE: Unload complete')
 
-    def _load_tool(self, tool, skip_preheat=False):
+    def _load_tool(self, tool, skip_preheat=False, purge=True):
         """
         Load filament for specified tool.
 
@@ -370,6 +373,7 @@ class ToolCommands:
         Args:
             tool: Tool (gate) number to load
             skip_preheat: If True, skip automatic temperature pre-heating
+            purge: If False, skip the purge (poop) macro after loading
         """
         self.gcode.respond_info(f'ACE: Loading tool {tool}...')
 
@@ -395,8 +399,10 @@ class ToolCommands:
             self.gcode.respond_info('ACE: Feeding to nozzle (single sensor mode)')
             self._feed_extruder_to_nozzle()
 
-        # 5. Prime/purge
-        if self.controller.poop_macros:
+        # 5. Prime/purge (skipped when the caller says the colour isn't changing)
+        if not purge:
+            self.gcode.respond_info('ACE: Same colour, skipping purge')
+        elif self.controller.poop_macros:
             self.gcode.respond_info(f'ACE: Executing poop macro: {self.controller.poop_macros}')
             try:
                 self.gcode.run_script_from_command(self.controller.poop_macros)

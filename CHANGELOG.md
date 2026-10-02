@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `ACE_CHANGE_TOOL ... PURGE=0` loads without running the purge (poop) macro, for a spool the
+  same colour as the one it replaces. Default `PURGE=1` keeps the old behaviour.
 - Hot-plug: a unit that was off, still starting, or flapping when Klipper started is picked up
   once it has stayed on USB for 15 s, without a restart. With no filament loaded it gets the
   order a restart would give (config `device_order`, then remembered offsets); with filament
