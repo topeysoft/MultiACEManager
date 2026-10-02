@@ -32,6 +32,39 @@ class AceDeviceDiscovery:
     ACE_PRODUCT_NAME = "ACE"
 
     @staticmethod
+    def quick_scan(sys_tty='/sys/class/tty'):
+        """
+        ACE units on USB right now, without opening a port or logging anything: cheap
+        enough to run every few seconds.
+
+        Each entry has port (by-path), port_tty, usb_location (e.g. "3-1.3.3:1.0", the
+        same form discovery uses), device_id, and devnum. The kernel gives a USB device a
+        new devnum every time it enumerates, so (port_tty, devnum) changes whenever a unit
+        drops off and comes back.
+        """
+        units = []
+        for tty in sorted(glob.glob(os.path.join(sys_tty, 'ttyACM*'))):
+            try:
+                interface = os.path.realpath(os.path.join(tty, 'device'))   # .../3-1.3.3/3-1.3.3:1.0
+                usb = os.path.dirname(interface)
+                with open(os.path.join(usb, 'idVendor')) as f:
+                    if int(f.read().strip(), 16) != AceDeviceDiscovery.ACE_VID:
+                        continue
+                with open(os.path.join(usb, 'devnum')) as f:
+                    devnum = int(f.read().strip())
+            except (OSError, ValueError):
+                continue
+            tty_dev = '/dev/' + os.path.basename(tty)
+            port = AceDeviceDiscovery.find_by_path_for_device(tty_dev)
+            if not port:
+                continue
+            unit = {'port': port, 'port_tty': tty_dev, 'usb_location': os.path.basename(interface),
+                    'location': os.path.basename(interface), 'devnum': devnum}
+            unit['device_id'] = AceDeviceDiscovery._generate_device_id(unit)
+            units.append(unit)
+        return units
+
+    @staticmethod
     def find_by_path_for_device(tty_device):
         """
         Find /dev/serial/by-path symlink for a tty device.

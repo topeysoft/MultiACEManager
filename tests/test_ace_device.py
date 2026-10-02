@@ -154,3 +154,34 @@ def test_write_io_error_disconnects_and_reconnects(make_device, reactor, caplog)
     assert device._serial is not first_serial
     pump(device, reactor, polls=3)  # get_info, then a status poll and its reply
     assert device.is_ready()
+
+
+def test_read_error_reconnects_once_and_keeps_the_new_connection(make_device, reactor):
+    """A read error used to schedule a reconnect, then the write step failed on the closed
+    port and scheduled a second one. The second open hit 'Could not exclusively lock port'
+    and its failure path marked the device disconnected, dropping the good connection."""
+    from ace_sim import FakeSerial
+    device, sim = make_device()
+    connect(device, reactor)
+    pump(device, reactor, polls=2)
+    assert device.lock, "a status request is in flight"
+    sim.fail_next_reads = 1
+    pump(device, reactor, polls=1)       # read fails -> disconnect, one reconnect scheduled
+    reactor.advance(10)                  # let every scheduled connect attempt run
+    pump(device, reactor, polls=3)
+    assert device._connected and device._serial is not None and device._serial.is_open
+    assert sum(1 for i in FakeSerial.instances if i.port == PORT and i.is_open) == 1
+    lock_errors = [i for i in FakeSerial.instances if i.port == PORT]
+    assert len(lock_errors) == 2, "exactly one reconnect after the first connection"
+    assert device.is_ready() or device.gate_status is not None
+
+
+def test_stale_connect_timer_leaves_a_healthy_connection_alone(make_device, reactor):
+    from ace_sim import FakeSerial
+    device, _ = make_device()
+    connect(device, reactor)
+    pump(device, reactor, polls=2)
+    # A connect attempt fires while already connected (e.g. a leftover timer)
+    device._connect(reactor.monotonic())
+    assert device._connected and device._serial.is_open
+    assert sum(1 for i in FakeSerial.instances if i.port == PORT and i.is_open) == 1

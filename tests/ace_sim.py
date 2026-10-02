@@ -77,6 +77,7 @@ class AceSimulator:
         self.drop_next_response = False
         self.corrupt_next_crc = False
         self.fail_next_writes = 0
+        self.fail_next_reads = 0   # in_waiting raises EIO, like a unit dropping off USB
         # Everything received, in order, for assertions.
         self.received = []
 
@@ -225,6 +226,10 @@ class FakeSerial:
         if port not in self.simulators:
             raise pyserial.SerialException(
                 f"[Errno 2] could not open port {port}: No such file or directory")
+        if kwargs.get("exclusive") and any(i.port == port and i.is_open for i in self.instances):
+            # pyserial takes an flock with exclusive=True; a second open fails like this
+            raise pyserial.SerialException(
+                f"[Errno 11] Could not exclusively lock port {port}: [Errno 11] Resource temporarily unavailable")
         self.port = port
         self.baudrate = baudrate
         self.kwargs = kwargs
@@ -238,6 +243,9 @@ class FakeSerial:
     @property
     def in_waiting(self):
         self._require_open()
+        if self.sim.fail_next_reads > 0:
+            self.sim.fail_next_reads -= 1
+            raise OSError(5, "Input/output error")
         return len(self.rx)
 
     def read(self, size=1):

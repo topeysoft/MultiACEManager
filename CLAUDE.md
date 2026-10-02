@@ -63,3 +63,8 @@ Python for local work: `~/.venvs/klipperace` (pyserial, pytest, requests). Do no
   regression tests in `tests/test_packet.py`.
 - At boot ACE_1's `usbv2` by-path link can be missing for a moment: one "could not open port" retry
   and sometimes one EIO write error, then it reconnects. Harmless unless it repeats.
+
+- Units are found at startup and then by the hot-plug check in `AceDeviceManager._hotplug_check`
+  (every 5 s, `quick_scan` reads sysfs only; a unit must keep the same USB devnum for 15 s).
+  obi1's unit on USB 3-1.3.3 was re-enumerating every 3-4 s on 2026-10-01 (hardware: cable/port),
+  which is what made the gate count change between restarts.

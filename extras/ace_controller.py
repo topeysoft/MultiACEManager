@@ -123,6 +123,10 @@ class AceController:
         # Initialize based on total_gates from device manager
         # Default to False - feed assist must be manually enabled per gate
         self.gate_feed_assist = [False] * self.device_manager.total_gates
+        # A unit can be picked up after startup (hot-plug): grow per-gate state with it,
+        # and keep gate numbers still while filament is loaded.
+        self.device_manager.on_devices_changed.append(self._on_devices_changed)
+        self.device_manager.is_tool_loaded = lambda: self.current_tool is not None and self.current_tool >= 0
 
         # Feed retry state (for handling feed timeout retries)
         self.feed_retry_state = None
@@ -141,6 +145,12 @@ class AceController:
         self.printer.register_event_handler('klippy:ready', self._register_commands)
 
         logging.info(f"AceController: Initialized with {self.device_manager.total_gates} total gates")
+
+    def _on_devices_changed(self):
+        total = self.device_manager.total_gates
+        if len(self.gate_feed_assist) < total:
+            self.gate_feed_assist += [False] * (total - len(self.gate_feed_assist))
+        logging.info(f"AceController: now {total} total gates")
 
     def _handle_ready(self):
         """Handle Klipper ready event"""

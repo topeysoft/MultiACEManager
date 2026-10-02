@@ -12,6 +12,9 @@ from .device_discovery import AceDeviceDiscovery
 from .device_mapper import AceDeviceMapper
 from ..protocol.constants import GATES_PER_ACE
 
+HOTPLUG_INTERVAL = 5.0   # seconds between looks for units that appeared or came back
+HOTPLUG_STABLE = 15.0    # a unit is only used after this long on the same USB enumeration
+
 
 def order_devices(devices, known_offsets=None, device_order=(), aliases=None):
     """
@@ -109,6 +112,14 @@ class AceDeviceManager:
         # Check configuration method
         serial_ports_str = config.get('serial_ports', None)
         auto_detect = config.getboolean('auto_detect', False)
+
+        # Hot-plug: units that appear after startup, or come back after giving up
+        self._auto_detect = auto_detect
+        self._scan = AceDeviceDiscovery.quick_scan
+        self._seen = {}            # usb_location -> ((port_tty, devnum), first seen at)
+        self._next_hotplug = 0.0
+        self.on_devices_changed = []            # callbacks after a unit is added
+        self.is_tool_loaded = lambda: False     # set by the controller
 
         if auto_detect:
             self._setup_auto_detect()
@@ -259,8 +270,9 @@ class AceDeviceManager:
             ace_instance = device['instance']
             ace_instance.connect()
 
-        # Start global I/O timer immediately (devices will connect asynchronously)
-        if self.ace_devices and not self.global_io_timer:
+        # Start global I/O timer immediately (devices will connect asynchronously).
+        # With auto-detect it runs even with no units yet, so a late unit is picked up.
+        if (self.ace_devices or self._auto_detect) and not self.global_io_timer:
             from ..protocol.constants import READY_WAIT_DELAY
             self.global_io_timer = self.reactor.register_timer(
                 self._global_io_handler,
@@ -591,6 +603,8 @@ class AceDeviceManager:
         Polls all devices sequentially, preventing timer conflicts.
         """
         try:
+            self._hotplug_check(eventtime)
+
             # Poll each device (sequential, but very fast ~1ms each)
             connected_count = 0
             for device_info in self.ace_devices:
@@ -630,6 +644,117 @@ class AceDeviceManager:
             import traceback
             traceback.print_exc()
             return eventtime + 5.0  # Failsafe
+
+    # ---- hot-plug ---------------------------------------------------------
+
+    def _hotplug_check(self, eventtime):
+        """
+        Every few seconds: reconnect units that gave up, and pick up units that appeared
+        after startup. A unit is only used once it has stayed on the same USB enumeration
+        for HOTPLUG_STABLE seconds, so one that keeps dropping off USB is left alone.
+        """
+        if eventtime < self._next_hotplug:
+            return
+        self._next_hotplug = eventtime + HOTPLUG_INTERVAL
+        try:
+            units = self._scan()
+        except Exception as e:
+            logging.debug(f"AceDeviceManager: hot-plug scan failed: {e}")
+            return
+
+        seen = {}
+        for unit in units:
+            loc = unit.get('usb_location') or ''
+            ident = (unit.get('port_tty'), unit.get('devnum'))
+            prev = self._seen.get(loc)
+            seen[loc] = prev if prev and prev[0] == ident else (ident, eventtime)
+        self._seen = seen
+        stable = {loc for loc, (_, since) in seen.items() if eventtime - since >= HOTPLUG_STABLE}
+        managed = {d.get('usb_location') or '': d for d in self.ace_devices}
+
+        # 1. A known unit that gave up retrying is back and steady: connect again.
+        for loc, dev in managed.items():
+            inst = dev['instance']
+            if loc in stable and not inst._connected and getattr(inst, 'gave_up', False):
+                logging.info(f"AceDeviceManager: {dev['name']} ({loc}) is back on USB, reconnecting")
+                inst.connect()
+
+        # 2. A unit that wasn't there at startup is now steady: start using it.
+        if not self._auto_detect:
+            return
+        new = [u for u in units if (u.get('usb_location') or '') in stable and u['usb_location'] not in managed]
+        if not new or self._printing(eventtime):
+            return
+        for unit in new:
+            self.add_device(unit)
+
+    def _printing(self, eventtime):
+        print_stats = self.printer.lookup_object('print_stats', None)
+        if print_stats is None:
+            return False
+        try:
+            return print_stats.get_status(eventtime).get('state') in ('printing', 'paused')
+        except Exception:
+            return False
+
+    def add_device(self, unit):
+        """
+        Start using a unit that appeared after startup.
+
+        With no filament loaded, the units are put in the order startup would have given
+        them (config device_order, then remembered offsets) and that is saved, exactly as
+        if Klipper had restarted with every unit present. With filament loaded, existing
+        gate numbers must not move under it: the new unit goes after them, and the proper
+        order takes effect at the next restart.
+        """
+        inst = AceDevice(
+            port=unit['port'],
+            baud=self.baud,
+            device_id=unit['device_id'],
+            reactor=self.reactor,
+            log_level=self.log_level,
+            connect_retry_delay=self.connect_retry_delay,
+            connect_retry_max=self.connect_retry_max
+        )
+        entry = {
+            'name': '',
+            'device_id': unit['device_id'],
+            'port': unit['port'],
+            'port_tty': unit.get('port_tty', ''),
+            'instance': inst,
+            'gate_offset': len(self.ace_devices) * GATES_PER_ACE,
+            'usb_location': unit.get('usb_location', ''),
+        }
+        reorder = not self.is_tool_loaded()
+        if reorder:
+            ordered = self.order_devices(self.ace_devices + [entry])
+        else:
+            ordered = self.ace_devices + [entry]
+        for i, dev in enumerate(ordered):
+            dev['gate_offset'] = i * GATES_PER_ACE
+            dev['name'] = f"ACE_{i+1}"
+            if reorder:
+                self.device_mapper.update_device(dev['device_id'], dev['port'], dev.get('usb_location'),
+                                                 dev['gate_offset'], dev.get('port_tty'))
+        self.ace_devices = ordered
+        self.device_ids[entry['port']] = entry['device_id']
+        self.total_gates = len(self.ace_devices) * GATES_PER_ACE
+        if reorder:
+            self.device_mapper.save()
+
+        layout = ", ".join(f"{d['name']}={d['device_id']} (gates {d['gate_offset'] + 1}-{d['gate_offset'] + GATES_PER_ACE})"
+                           for d in self.ace_devices)
+        logging.info(f"AceDeviceManager: Picked up {entry['device_id']} after startup; now {layout}")
+        inst.connect()
+        for callback in list(self.on_devices_changed):
+            try:
+                callback()
+            except Exception:
+                logging.exception("AceDeviceManager: on_devices_changed callback failed")
+        gcode = self.printer.lookup_object('gcode', None)
+        if gcode is not None:
+            gcode.respond_info(f"ACE: found {entry['name']} on USB {entry['usb_location']}. {layout}")
+        return entry
 
     def _get_global_adaptive_interval(self):
         """

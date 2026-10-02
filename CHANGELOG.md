@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Hot-plug: a unit that was off, still starting, or flapping when Klipper started is picked up
+  once it has stayed on USB for 15 s, without a restart. With no filament loaded it gets the
+  order a restart would give (config `device_order`, then remembered offsets); with filament
+  loaded, existing gates stay put and the new unit goes after them. Never during a print.
+  A unit whose driver gave up retrying reconnects when its port is back and steady.
+- Fix "Could not exclusively lock port" churn: after a read error the write step ran on the
+  closed port and scheduled a second reconnect; the second open failed on the lock and dropped
+  the good connection. One connect attempt at a time now, and stale attempts are ignored.
 - Gate order is now remembered: devices keep their gate range across restarts and re-cabling as
   long as they stay on the same USB port; new units are appended instead of re-rolling existing gates.
 - New `ACE_SET_DEVICE_ORDER DEVICES=...` command and optional `device_order:` config option.

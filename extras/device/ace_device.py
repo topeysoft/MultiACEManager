@@ -79,6 +79,7 @@ class AceDevice:
         self._queue = None  # Will be created in _handle_ready
 
         # Connection retry state
+        self.gave_up = False   # stopped retrying; the device manager revives it once the port is stable
         self._connection_retry_count = 0
         self._connection_retry_backoff = 1.0
 
@@ -131,6 +132,7 @@ class AceDevice:
         """
         logging.info(f'AceDevice: Connecting to {self.serial_id}')
         self._connected = False
+        self.gave_up = False
         self._connection_retry_count = 0
         self._connection_retry_backoff = 1.0
         self._queue = queue.Queue()
@@ -139,6 +141,17 @@ class AceDevice:
         if hasattr(self.reactor, 'printer'):
             self._printer = self.reactor.printer
 
+        self._schedule_connect()
+
+    def _schedule_connect(self):
+        """One connection attempt at a time: a second timer would open the port again, hit
+        'Could not exclusively lock port', and its failure path would drop the good one."""
+        old = getattr(self, 'connect_timer', None)
+        if old is not None:
+            try:
+                self.reactor.unregister_timer(old)
+            except Exception:
+                pass
         self.connect_timer = self.reactor.register_timer(self._connect, self.reactor.NOW)
 
     def disconnect(self):
@@ -153,6 +166,8 @@ class AceDevice:
 
     def _connect(self, eventtime):
         """Attempt to connect to ACE device via serial port"""
+        if self._connected and self._serial is not None and self._serial.is_open:
+            return self.reactor.NEVER   # already connected: a leftover attempt has nothing to do
         # If we're in I/O error cooldown, wait before attempting connection
         if self._io_error_cooldown:
             cooldown_delay = 5.0  # 5 second cooldown for I/O errors
@@ -207,6 +222,7 @@ class AceDevice:
                 logging.error(f'AceDevice: Device will remain disconnected - Klipper will continue startup')
                 # Don't block Klipper startup - just mark as disconnected
                 self._connected = False
+                self.gave_up = True
                 return self.reactor.NEVER
 
             # Calculate retry delay with exponential backoff
@@ -223,6 +239,7 @@ class AceDevice:
             logging.error(f'AceDevice: Unexpected connection error: {e}')
 
             if self._connection_retry_count >= self.connect_retry_max:
+                self.gave_up = True
                 return self.reactor.NEVER
 
             return eventtime + self.connect_retry_delay
@@ -274,6 +291,10 @@ class AceDevice:
         # First, check for incoming data (reading)
         self._process_incoming_data(eventtime)
 
+        # A read error disconnects and schedules a reconnect: don't write to the closed port
+        if not self._connected:
+            return
+
         # Then, send outgoing requests (writing)
         self._process_outgoing_requests(eventtime)
 
@@ -296,7 +317,7 @@ class AceDevice:
             logging.error(f"AceDevice: Unable to communicate: {e}")
             self.lock = False
             self._serial_disconnect()
-            self.connect_timer = self.reactor.register_timer(self._connect, self.reactor.NOW)
+            self._schedule_connect()
             return  # Just return, timer scheduling handled by _io_handler
 
         if len(raw_bytes):
@@ -373,7 +394,7 @@ class AceDevice:
             logging.error(f'AceDevice writer error: {e}\n{traceback.format_exc()}')
             self.lock = False
             self._serial_disconnect()
-            self.connect_timer = self.reactor.register_timer(self._connect, self.reactor.NOW)
+            self._schedule_connect()
 
     def _send_request(self, request: Dict[str, Any]) -> None:
         """Send a JSON-RPC request to ACE device with retry logic"""
