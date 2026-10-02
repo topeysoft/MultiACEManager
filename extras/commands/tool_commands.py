@@ -8,10 +8,14 @@ Commands:
 """
 
 import logging
+
+from ..exceptions import gcode_guard
 from ..exceptions import AceException
 
 
 class ToolCommands:
+    # Highest pull rate observed from an ACE Pro (mm/s) regardless of the speed parameter.
+    ACE_MAX_PULL_RATE = 25.0
     """
     Tool movement and change commands.
 
@@ -35,39 +39,39 @@ class ToolCommands:
     def register(self):
         """Register all tool-related commands"""
         self.gcode.register_command(
-            'ACE_CHANGE_TOOL', self.cmd_ACE_CHANGE_TOOL,
+            'ACE_CHANGE_TOOL', gcode_guard(self.cmd_ACE_CHANGE_TOOL),
             desc='Change to specified tool')
 
         self.gcode.register_command(
-            'ACE_FEED', self.cmd_ACE_FEED,
+            'ACE_FEED', gcode_guard(self.cmd_ACE_FEED),
             desc='Feed filament from gate')
 
         self.gcode.register_command(
-            'ACE_RETRACT', self.cmd_ACE_RETRACT,
+            'ACE_RETRACT', gcode_guard(self.cmd_ACE_RETRACT),
             desc='Retract filament to gate')
 
         self.gcode.register_command(
-            'ACE_CLEAR_SELECTION', self.cmd_ACE_CLEAR_SELECTION,
+            'ACE_CLEAR_SELECTION', gcode_guard(self.cmd_ACE_CLEAR_SELECTION),
             desc='Clear gate selection without unloading')
 
         self.gcode.register_command(
-            'ACE_SET_GATE', self.cmd_ACE_SET_GATE,
+            'ACE_SET_GATE', gcode_guard(self.cmd_ACE_SET_GATE),
             desc='Set selected gate without loading')
 
         self.gcode.register_command(
-            'ACE_ENABLE_FEED_ASSIST', self.cmd_ACE_ENABLE_FEED_ASSIST,
+            'ACE_ENABLE_FEED_ASSIST', gcode_guard(self.cmd_ACE_ENABLE_FEED_ASSIST),
             desc='Enable feed assist for gate')
 
         self.gcode.register_command(
-            'ACE_DISABLE_FEED_ASSIST', self.cmd_ACE_DISABLE_FEED_ASSIST,
+            'ACE_DISABLE_FEED_ASSIST', gcode_guard(self.cmd_ACE_DISABLE_FEED_ASSIST),
             desc='Disable feed assist for gate')
 
         self.gcode.register_command(
-            'ACE_RETRY_FEED', self.cmd_ACE_RETRY_FEED,
+            'ACE_RETRY_FEED', gcode_guard(self.cmd_ACE_RETRY_FEED),
             desc='Retry failed feed operation after user intervention')
 
         self.gcode.register_command(
-            'ACE_CANCEL_FEED', self.cmd_ACE_CANCEL_FEED,
+            'ACE_CANCEL_FEED', gcode_guard(self.cmd_ACE_CANCEL_FEED),
             desc='Cancel failed feed operation and abort tool change')
 
         logging.info("ToolCommands: Registered ACE_CHANGE_TOOL, ACE_FEED, ACE_RETRACT, ACE_CLEAR_SELECTION, ACE_SET_GATE, ACE_ENABLE_FEED_ASSIST, ACE_DISABLE_FEED_ASSIST, ACE_RETRY_FEED, ACE_CANCEL_FEED")
@@ -193,21 +197,25 @@ class ToolCommands:
 
     def _sequential_retract_to_clear_sensor(self, tool, device, local_gate):
         """
-        Clear extruder sensor using sequential extruder retract + ACE test pull.
+        Clear the extruder sensor with the ACE pulling *while* the extruder retracts.
+
+        Why not extruder first, ACE afterwards: with the filament gripped by the
+        extruder gears, an extruder-only retract has to push filament backwards
+        into the bowden/hub. Any slack there lets the filament buckle into loops,
+        the gears then grind instead of moving the tip, the sensor never clears,
+        and every retry adds more slack. Keeping the ACE pulling at the same speed
+        keeps the filament in tension so the gears can actually move it.
 
         Procedure per attempt:
-          1. Extruder-only retract of extruder_clearance_length (pulls filament
-             back from cutter/nozzle area through extruder gears)
-          2. ACE-only test pull of sensor_clear_max_distance at sensor_clear_speed
-             (gently pulls filament past the extruder sensor)
-          3. Check extruder sensor — if clear, done; if not, retry from step 1
+          0. (first attempt only) ACE take-up pull to remove existing slack
+          1. ACE retract of extruder_clearance_length + sensor_clear_max_distance
+             at the extruder speed, started first
+          2. Extruder retract of extruder_clearance_length at the same speed,
+             so the two motors run together with the ACE slightly ahead
+          3. Wait for the ACE to finish, check the extruder sensor
 
-        The extruder and ACE motors operate sequentially, never simultaneously.
-        The extruder retract creates slack that allows the ACE to pull the
-        filament tip past the sensor.
-
-        After this completes, _retract_to_gate() must be called to pull
-        the full toolchange_retract_length to clear the splitter.
+        After this completes, _retract_to_gate() pulls the remaining
+        toolchange_retract_length to clear the splitter.
 
         Args:
             tool: Tool (gate) number
@@ -218,33 +226,55 @@ class ToolCommands:
             AceException: If sensor doesn't clear after max attempts
         """
         extruder_retract_length = self.controller.extruder_clearance_length
-        ace_pull_length = self.controller.extruder_clearance_length
-        ace_pull_speed = self.controller.sensor_clear_speed
+        slack_margin = self.controller.sensor_clear_max_distance
         extruder_speed = self.controller.extruder_move_speed
+        ace_speed = self.controller.retract_speed
+        takeup_speed = self.controller.sensor_clear_speed
         max_retries = 5
+
+        # The ACE's "speed" parameter is not mm/s (measured on ACE Pro V1.3.x: value 20
+        # gives ~5 mm/s, values >= 50 cap near ACE_MAX_PULL_RATE). To guarantee the ACE keeps
+        # pulling for the whole extruder move whatever its real rate, request a length that
+        # would take longer than the extruder move even at the maximum rate; the ACE simply
+        # holds tension (slips) once the gripped filament stops moving, and is told to stop
+        # as soon as the extruder is done.
+        extruder_duration = extruder_retract_length / max(extruder_speed, 0.1)
+        ace_pull_length = int(extruder_retract_length + extruder_duration * self.ACE_MAX_PULL_RATE + slack_margin)
+
+        def retract_callback(response):
+            if 'code' in response and response['code'] != 0:
+                logging.error(f"ACE retract error: {response.get('msg', 'Unknown error')}")
+
+        def stop_callback(response):
+            if 'code' in response and response['code'] != 0:
+                logging.debug(f"ACE stop after pull: {response.get('msg', 'Unknown error')}")
+
+        # Step 0: take up slack already sitting between ACE and toolhead (loops from a
+        # previous load/unload). The filament is gripped by the extruder, so the ACE
+        # simply stops pulling once it is taut.
+        logging.info(f'ToolCommands: ACE slack take-up {extruder_retract_length}mm at speed {takeup_speed}')
+        device.retract(local_gate, extruder_retract_length, takeup_speed, retract_callback)
+        self.reactor.pause(self.reactor.monotonic() + 1.0)
+        device.wait_ready()
 
         for attempt in range(max_retries):
             logging.info(f'ToolCommands: Sensor clear attempt {attempt + 1}/{max_retries}')
 
-            # Step A: Extruder-only retract to create slack
-            logging.info(f'ToolCommands: Extruder retract {extruder_retract_length}mm at {extruder_speed}mm/s')
+            # Step 1: ACE starts pulling first, sized to outlast the extruder move
+            logging.info(f'ToolCommands: ACE pull up to {ace_pull_length}mm at speed {ace_speed} (leading, '
+                         f'covers {extruder_duration:.1f}s extruder move)')
+            device.retract(local_gate, ace_pull_length, ace_speed, retract_callback)
+            self.reactor.pause(self.reactor.monotonic() + 0.5)
+
+            # Step 2: extruder retracts while the ACE keeps tension
+            logging.info(f'ToolCommands: Extruder retract {extruder_retract_length}mm at {extruder_speed}mm/s (synchronized)')
             self._extruder_move(-extruder_retract_length, extruder_speed)
             self.controller.toolhead.wait_moves()
 
-            # Step B: ACE-only test pull to check if filament clears sensor
-            logging.info(f'ToolCommands: ACE test pull {ace_pull_length}mm at {ace_pull_speed}mm/s')
-
-            def retract_callback(response):
-                if 'code' in response and response['code'] != 0:
-                    logging.error(f"ACE retract error: {response.get('msg', 'Unknown error')}")
-
-            device.retract(local_gate, ace_pull_length, ace_pull_speed, retract_callback)
-
-            # Wait for firmware to begin processing, then wait for completion
-            self.reactor.pause(self.reactor.monotonic() + 1.5)
+            # Step 3: stop the ACE (it would otherwise finish the oversized pull), then check
+            device.stop_feeding(local_gate, stop_callback)
+            self.reactor.pause(self.reactor.monotonic() + 0.5)
             device.wait_ready()
-
-            # Step C: Check if extruder sensor has cleared
             if not self._check_sensor(self.controller.extruder_sensor):
                 logging.info(f'ToolCommands: Extruder sensor cleared after {attempt + 1} attempt(s)')
                 self.gcode.respond_info(f'ACE: Sensor cleared after {attempt + 1} attempt(s)')
@@ -255,7 +285,7 @@ class ToolCommands:
 
         # All retries exhausted
         total_extruder = max_retries * extruder_retract_length
-        total_ace = max_retries * ace_pull_length
+        total_ace = extruder_retract_length + max_retries * extruder_retract_length  # effective, ACE slips beyond this
         error_msg = (f'ACE Error: Failed to clear extruder sensor after {max_retries} '
                      f'attempts (extruder retracted {total_extruder}mm, ACE pulled {total_ace}mm)')
         logging.error(f'ToolCommands: {error_msg}')

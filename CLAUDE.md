@@ -44,6 +44,12 @@ Python for local work: `~/.venvs/klipperace` (pyserial, pytest, requests). Do no
 - Repo `ace.cfg` uses `serial_ports:`; obi1's live `ace.cfg` uses `auto_detect: true` and
   `log_level: DEBUG`. The printer's copy of the config lives in the parent repo under `OBI1/`.
 
+- Every G-code handler is registered through `gcode_guard` (extras/exceptions.py) so an
+  `AceException` becomes `gcmd.error`; a test enforces this for all command modules.
+
+- Unload sensor clearing is synchronized (ACE leads, extruder follows at the same speed); see
+  `_sequential_retract_to_clear_sensor` and tests/test_unload_sync.py. Do not make it sequential again.
+
 ## Gotchas
 
 - This checkout lives in iCloud Drive. Evicted files hang on read; `brctl download <path>` fetches

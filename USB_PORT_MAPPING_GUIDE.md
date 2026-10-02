@@ -282,7 +282,24 @@ ls -la ~/printer_data/config/ace_device_map.cfg
 **A:** This is normal! Gate offsets are **dynamically assigned** based on currently connected devices. Use `ACE_SHOW_USB_INFO` to see the mapping.
 
 ### Q: Want to force specific gate order?
-**A:** Physically arrange USB connections in desired order (port 1, 2, 3...). Devices are assigned gates based on USB port order.
+**A:** Use `ACE_SET_DEVICE_ORDER`. Gates 0-3 go to the first listed device, 4-7 to the second, and so on:
+
+```
+ACE_SET_DEVICE_ORDER DEVICES=ACE_2,ACE_1      # swap two units (names from ACE_LIST_DEVICES)
+ACE_SET_DEVICE_ORDER DEVICES=left,right       # aliases work too
+```
+
+The order is saved in `ace_device_map.cfg` and reused at every start. Devices seen before keep
+their remembered order; a newly added unit is appended after them instead of re-rolling existing
+gates. To pin the order in the config instead, add to `[ace]`:
+
+```
+device_order: hub_3_port_1_3_3_1_0, hub_3_port_1_1_3_1_0   # device IDs or aliases
+```
+
+Note: two ACE Pro units report identical USB serial numbers, so identity is the USB port. If you
+move a unit to a different port it is a new device to the plugin; run `ACE_SET_DEVICE_ORDER` once
+after re-cabling.
 
 ### Q: "No /dev/serial/by-path symlink found" error
 **A:** KlipperACE **requires** by-path for operation. This error means:

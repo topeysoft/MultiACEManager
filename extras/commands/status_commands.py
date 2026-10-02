@@ -10,6 +10,8 @@ Commands:
 """
 
 import logging
+
+from ..exceptions import gcode_guard
 import json
 from ..device import AceDeviceDiscovery
 
@@ -37,23 +39,23 @@ class StatusCommands:
     def register(self):
         """Register all status commands"""
         self.gcode.register_command(
-            'ACE_GET_STATUS', self.cmd_ACE_GET_STATUS,
+            'ACE_GET_STATUS', gcode_guard(self.cmd_ACE_GET_STATUS),
             desc='Get ACE system status')
 
         self.gcode.register_command(
-            'ACE_SCAN_DEVICES', self.cmd_ACE_SCAN_DEVICES,
+            'ACE_SCAN_DEVICES', gcode_guard(self.cmd_ACE_SCAN_DEVICES),
             desc='Scan for ACE devices on USB')
 
         self.gcode.register_command(
-            'ACE_LIST_DEVICES', self.cmd_ACE_LIST_DEVICES,
+            'ACE_LIST_DEVICES', gcode_guard(self.cmd_ACE_LIST_DEVICES),
             desc='List all connected ACE devices')
 
         self.gcode.register_command(
-            'ACE_SHOW_USB_INFO', self.cmd_ACE_SHOW_USB_INFO,
+            'ACE_SHOW_USB_INFO', gcode_guard(self.cmd_ACE_SHOW_USB_INFO),
             desc='Show USB topology and device mapping')
 
         self.gcode.register_command(
-            'ACE_DEBUG', self.cmd_ACE_DEBUG,
+            'ACE_DEBUG', gcode_guard(self.cmd_ACE_DEBUG),
             desc='Send raw JSON-RPC commands to ACE device')
 
         logging.info("StatusCommands: Registered 5 diagnostic commands")

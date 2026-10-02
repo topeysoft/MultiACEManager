@@ -23,6 +23,18 @@ You must also provide at least one sensor pin:
 
 ```ini
 extruder_sensor_pin: ^EBBCan: PB9    # Required
+
+#### `sensor_clear_max_distance`
+- Type: integer (mm), default 20
+- Extra length the ACE pulls beyond `extruder_clearance_length` on every sensor-clearing attempt,
+  so the filament stays in tension while the extruder retracts (slack margin).
+
+#### `device_order`
+- Type: comma-separated list of device IDs or aliases
+- Default: empty (remembered order from `ace_device_map.cfg`, then USB location)
+- Pins which device owns gates 0-3, 4-7, ... regardless of USB enumeration order. Devices not
+  listed follow the listed ones. `ACE_SET_DEVICE_ORDER` changes the remembered order at runtime; see USB_PORT_MAPPING_GUIDE.md.
+
 ```
 
 ---

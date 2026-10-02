@@ -13,6 +13,41 @@ from .device_mapper import AceDeviceMapper
 from ..protocol.constants import GATES_PER_ACE
 
 
+def order_devices(devices, known_offsets=None, device_order=(), aliases=None):
+    """
+    Decide the gate order of discovered ACE devices.
+
+    Priority:
+      1. ``device_order`` from ``[ace]`` (device IDs or aliases), in the listed order
+      2. devices seen before keep their relative order from the saved gate offsets
+         (so re-cabling or adding a unit does not silently re-roll existing gates)
+      3. never-seen devices follow, sorted by USB location
+
+    Args:
+        devices: list of dicts with at least ``device_id`` and ``usb_location``
+        known_offsets: {device_id: last_gate_offset} for devices in the device map
+        device_order: explicit order of device IDs / aliases (from config)
+        aliases: {alias: device_id}
+
+    Returns:
+        A new list in gate order (offsets are assigned by position * GATES_PER_ACE).
+    """
+    known_offsets = known_offsets or {}
+    aliases = aliases or {}
+    explicit = [aliases.get(ref, ref) for ref in device_order]
+
+    def rank(dev):
+        device_id = dev['device_id']
+        location = dev.get('usb_location') or ''
+        if device_id in explicit:
+            return (0, explicit.index(device_id), 0, location)
+        if device_id in known_offsets:
+            return (1, 0, known_offsets[device_id], location)
+        return (2, 0, 0, location)
+
+    return sorted(devices, key=rank)
+
+
 class AceDeviceManager:
     """
     Manages pool of ACE Pro devices (0-4 physical units).
@@ -62,6 +97,14 @@ class AceDeviceManager:
         from ..protocol.constants import DEFAULT_ADAPTIVE_POLLING, WRITER_POLL_INTERVAL
         self.adaptive_polling = config.getboolean('adaptive_polling', DEFAULT_ADAPTIVE_POLLING)
         self.fixed_poll_interval = config.getfloat('poll_interval', WRITER_POLL_INTERVAL)
+
+        # Explicit gate order (device IDs or aliases); empty = remembered order, then USB location
+        device_order_str = config.get('device_order', '')
+        self.device_order = [s.strip() for s in device_order_str.split(',') if s.strip()]
+
+        # Persistent device map (created up front so ordering can use remembered gate offsets)
+        config_dir = os.path.expanduser('~/printer_data/config')
+        self.device_mapper = AceDeviceMapper(os.path.join(config_dir, 'ace_device_map.cfg'))
 
         # Check configuration method
         serial_ports_str = config.get('serial_ports', None)
@@ -124,8 +167,8 @@ class AceDeviceManager:
                 logging.info(f"AceDeviceManager:   by-path: {probe_result['port']}")
                 logging.info(f"AceDeviceManager:   tty ref: {probe_result.get('port_tty', 'N/A')}")
 
-        # Sort by USB location for deterministic ordering
-        verified_devices.sort(key=lambda d: d.get('usb_location', ''))
+        # Order: config device_order, then remembered gate offsets, then USB location
+        verified_devices = self.order_devices(verified_devices)
 
         # Create device instances
         for i, dev in enumerate(verified_devices):
@@ -159,13 +202,8 @@ class AceDeviceManager:
 
             logging.info(f"AceDeviceManager: Created {device_id} at gates {gate_offset}-{gate_offset+3}")
 
-        # Initialize device mapper for persistence
+        # Persist current ports and gate offsets
         if verified_devices:
-            config_dir = os.path.expanduser('~/printer_data/config')
-            map_file = os.path.join(config_dir, 'ace_device_map.cfg')
-            self.device_mapper = AceDeviceMapper(map_file)
-
-            # Update device map
             for i, dev_info in enumerate(self.ace_devices):
                 self.device_mapper.update_device(
                     dev_info['device_id'],
@@ -176,7 +214,7 @@ class AceDeviceManager:
                 )
 
             self.device_mapper.save()
-            logging.info(f"AceDeviceManager: Device map saved to {map_file}")
+            logging.info(f"AceDeviceManager: Device map saved to {self.device_mapper.config_path}")
 
     def _setup_from_serial_ports(self, serial_ports_str: str):
         """Setup from comma-separated serial port list"""
@@ -249,6 +287,63 @@ class AceDeviceManager:
             ace_instance = device['instance']
             ace_instance.disconnect()
 
+    def order_devices(self, devices):
+        """Apply the ordering rules (see module-level order_devices) using the device map."""
+        known = {did: info.get('last_gate_offset', 0)
+                 for did, info in self.device_mapper.get_all_devices().items()}
+        return order_devices(devices, known, self.device_order, self.device_mapper.get_all_aliases())
+
+    def resolve_device_ref(self, ref):
+        """
+        Resolve a user-supplied device reference to a connected device entry.
+        Accepts the display name (ACE_1, ACE_2...), a 1-based index, a device_id, or an alias.
+        """
+        ref = str(ref).strip()
+        for dev in self.ace_devices:
+            if ref.upper() == dev['name'].upper():
+                return dev
+        if ref.isdigit():
+            idx = int(ref) - 1
+            if 0 <= idx < len(self.ace_devices):
+                return self.ace_devices[idx]
+        device_id = self.device_mapper.resolve_device_id(ref) or ref
+        for dev in self.ace_devices:
+            if dev['device_id'] == device_id:
+                return dev
+        return None
+
+    def set_device_order(self, refs):
+        """
+        Re-assign gate ranges so the referenced devices come first, in the given order.
+        Devices not listed keep their relative order after the listed ones.
+        The new offsets are persisted in the device map and used at the next startup.
+
+        Returns:
+            list of (name, device_id, old_offset, new_offset)
+        """
+        ordered = []
+        for ref in refs:
+            dev = self.resolve_device_ref(ref)
+            if dev is None:
+                raise ValueError(f"Unknown device '{ref}' (use ACE_LIST_DEVICES names, device IDs or aliases)")
+            if dev in ordered:
+                raise ValueError(f"Device '{ref}' listed twice")
+            ordered.append(dev)
+        ordered += [dev for dev in self.ace_devices if dev not in ordered]
+
+        changes = []
+        for i, dev in enumerate(ordered):
+            new_offset = i * GATES_PER_ACE
+            changes.append((f"ACE_{i+1}", dev['device_id'], dev['gate_offset'], new_offset))
+            dev['gate_offset'] = new_offset
+            dev['name'] = f"ACE_{i+1}"
+            self.device_mapper.update_device(dev['device_id'], dev['port'], dev.get('usb_location'),
+                                             new_offset, dev.get('port_tty'))
+        self.ace_devices = ordered
+        self.device_mapper.save()
+        logging.info(f"AceDeviceManager: Device order set to {[d['device_id'] for d in ordered]}")
+        return changes
+
     def get_device_for_gate(self, global_gate: int) -> Tuple[AceDevice, int]:
         """
         Route global gate number to owning device and local gate.
@@ -304,6 +399,7 @@ class AceDeviceManager:
             {
                 'name': dev['name'],
                 'device_id': dev['device_id'],
+                'alias': self.device_mapper.get_alias(dev['device_id']),
                 'port': dev['port'],
                 'gate_offset': dev['gate_offset'],
                 'gates': list(range(dev['gate_offset'], dev['gate_offset'] + GATES_PER_ACE)),
@@ -326,6 +422,7 @@ class AceDeviceManager:
             {
                 'name': dev['name'],
                 'device_id': dev['device_id'],
+                'alias': self.device_mapper.get_alias(dev['device_id']),
                 'port': dev['port'],
                 'gate_offset': dev['gate_offset'],
                 'gates': list(range(dev['gate_offset'], dev['gate_offset'] + GATES_PER_ACE)),
@@ -428,8 +525,8 @@ class AceDeviceManager:
                         'existing': False
                     })
 
-        # Sort by USB location
-        verified_devices.sort(key=lambda d: d.get('usb_location', ''))
+        # Same ordering rules as startup
+        verified_devices = self.order_devices(verified_devices)
 
         # Analyze changes
         current_device_ids = {d['device_id']: d for d in self.ace_devices}

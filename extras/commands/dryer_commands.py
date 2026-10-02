@@ -9,6 +9,8 @@ Commands:
 
 import logging
 
+from ..exceptions import gcode_guard
+
 class DryerCommands:
     """
     Dryer control commands.
@@ -32,15 +34,15 @@ class DryerCommands:
     def register(self):
         """Register all dryer commands"""
         self.gcode.register_command(
-            'ACE_START_DRYING', self.cmd_ACE_START_DRYING,
+            'ACE_START_DRYING', gcode_guard(self.cmd_ACE_START_DRYING),
             desc='Start dryer on ACE device')
 
         self.gcode.register_command(
-            'ACE_STOP_DRYING', self.cmd_ACE_STOP_DRYING,
+            'ACE_STOP_DRYING', gcode_guard(self.cmd_ACE_STOP_DRYING),
             desc='Stop dryer on ACE device')
 
         self.gcode.register_command(
-            'ACE_GET_DRYER_STATUS', self.cmd_ACE_GET_DRYER_STATUS,
+            'ACE_GET_DRYER_STATUS', gcode_guard(self.cmd_ACE_GET_DRYER_STATUS),
             desc='Display dryer status for all devices')
 
         logging.info("DryerCommands: Registered ACE_START_DRYING, ACE_STOP_DRYING, ACE_GET_DRYER_STATUS")

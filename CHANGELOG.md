@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Gate order is now remembered: devices keep their gate range across restarts and re-cabling as
+  long as they stay on the same USB port; new units are appended instead of re-rolling existing gates.
+- New `ACE_SET_DEVICE_ORDER DEVICES=...` command and optional `device_order:` config option.
+- Fix packet framing: a 0xFE byte in the CRC/length no longer truncates responses.
+- Fix `stop_feed_assist` raising TypeError on an invalid gate.
+- Plugin errors inside G-code handlers (feed timeouts, sensor not clearing) are now reported as
+  normal command errors instead of shutting Klipper down with "Internal error".
+- Device status entries include `alias`.
+- Unload: the ACE now pulls *while* the extruder retracts (started first, same speed, plus a slack
+  take-up pull). The previous extruder-then-ACE sequence let filament buckle into the hub, the
+  extruder gears ground, and the extruder sensor never cleared.
+- Add offline test suite and `dev.sh` development loop.
+
 ## [2.0.0] - 2025-11-29
 
 ### 🎉 Complete Architecture Refactoring

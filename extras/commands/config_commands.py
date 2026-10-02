@@ -7,9 +7,12 @@ Commands:
 - ACE_ALIAS - Set friendly alias for a device
 - ACE_UNALIAS - Remove alias from a device
 - ACE_LIST_ALIASES - List all defined device aliases
+- ACE_SET_DEVICE_ORDER - Choose which device owns gates 0-3, 4-7, ... (persisted)
 """
 
 import logging
+
+from ..exceptions import gcode_guard
 
 
 class ConfigCommands:
@@ -35,26 +38,30 @@ class ConfigCommands:
     def register(self):
         """Register all configuration commands"""
         self.gcode.register_command(
-            'ACE_GATE_MAP', self.cmd_ACE_GATE_MAP,
+            'ACE_GATE_MAP', gcode_guard(self.cmd_ACE_GATE_MAP),
             desc='Configure gate properties')
 
         self.gcode.register_command(
-            'ACE_ENDLESS_SPOOL', self.cmd_ACE_ENDLESS_SPOOL,
+            'ACE_ENDLESS_SPOOL', gcode_guard(self.cmd_ACE_ENDLESS_SPOOL),
             desc='Enable/disable endless spool')
 
         self.gcode.register_command(
-            'ACE_ALIAS', self.cmd_ACE_ALIAS,
+            'ACE_ALIAS', gcode_guard(self.cmd_ACE_ALIAS),
             desc='Set device alias')
 
         self.gcode.register_command(
-            'ACE_UNALIAS', self.cmd_ACE_UNALIAS,
+            'ACE_UNALIAS', gcode_guard(self.cmd_ACE_UNALIAS),
             desc='Remove device alias')
 
         self.gcode.register_command(
-            'ACE_LIST_ALIASES', self.cmd_ACE_LIST_ALIASES,
+            'ACE_LIST_ALIASES', gcode_guard(self.cmd_ACE_LIST_ALIASES),
             desc='List all device aliases')
 
-        logging.info("ConfigCommands: Registered ACE_GATE_MAP, ACE_ENDLESS_SPOOL, ACE_ALIAS, ACE_UNALIAS, ACE_LIST_ALIASES")
+        self.gcode.register_command(
+            'ACE_SET_DEVICE_ORDER', gcode_guard(self.cmd_ACE_SET_DEVICE_ORDER),
+            desc='Assign gate ranges to devices in the given order (persisted)')
+        logging.info("ConfigCommands: Registered ACE_GATE_MAP, ACE_ENDLESS_SPOOL, ACE_ALIAS, ACE_UNALIAS, "
+                     "ACE_LIST_ALIASES, ACE_SET_DEVICE_ORDER")
 
     def cmd_ACE_GATE_MAP(self, gcmd):
         """
@@ -356,3 +363,41 @@ class ConfigCommands:
         self.gcode.respond_info('=' * 70)
         self.gcode.respond_info(f'Total: {len(aliases)} alias{"es" if len(aliases) != 1 else ""} defined')
         self.gcode.respond_info('=' * 70)
+
+    def cmd_ACE_SET_DEVICE_ORDER(self, gcmd):
+        """
+        ACE_SET_DEVICE_ORDER DEVICES=<ref>,<ref>,...
+
+        Give gates 0-3 to the first listed device, 4-7 to the second, and so on.
+        Devices not listed keep their relative order after the listed ones.
+        A reference is a name from ACE_LIST_DEVICES (ACE_1, ACE_2), a 1-based
+        index, a device ID, or an alias.
+
+        The order is saved to ace_device_map.cfg and reused at every start,
+        so it survives reboots and re-cabling as long as the units stay on the
+        same USB ports. To pin it in the config instead, set
+        device_order: <device_id_or_alias>, ... in [ace].
+
+        Examples:
+            ACE_SET_DEVICE_ORDER DEVICES=ACE_2,ACE_1      # swap two units
+            ACE_SET_DEVICE_ORDER DEVICES=left,right
+        """
+        devices_param = gcmd.get('DEVICES', '')
+        refs = [r.strip() for r in devices_param.split(',') if r.strip()]
+        if not refs:
+            raise gcmd.error('DEVICES parameter required, e.g. DEVICES=ACE_2,ACE_1')
+        if self.controller.current_tool is not None and self.controller.current_tool >= 0:
+            self.gcode.respond_info(
+                f'ACE: Warning - tool T{self.controller.current_tool} is currently selected; '
+                f'its gate number changes with the new order. Re-select the tool afterwards.')
+        try:
+            changes = self.device_manager.set_device_order(refs)
+        except ValueError as e:
+            raise gcmd.error(str(e))
+        self.gcode.respond_info('ACE: Device order updated (saved to ace_device_map.cfg):')
+        for name, device_id, old_offset, new_offset in changes:
+            alias = self.device_manager.device_mapper.get_alias(device_id)
+            label = f'{device_id} ({alias})' if alias else device_id
+            moved = '' if old_offset == new_offset else f'  (was {old_offset}-{old_offset+3})'
+            self.gcode.respond_info(f'  {name}: gates {new_offset}-{new_offset+3}  {label}{moved}')
+
