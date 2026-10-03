@@ -16,6 +16,10 @@ from ..exceptions import AceException
 class ToolCommands:
     # Highest pull rate observed from an ACE Pro (mm/s) regardless of the speed parameter.
     ACE_MAX_PULL_RATE = 25.0
+    # How often the extruder sensor is checked while the extruder retracts during unload, and how
+    # long past the move's own duration to keep watching (Klipper starts a queued move a little late).
+    SENSOR_POLL_INTERVAL = 0.05
+    MOVE_START_SLACK = 1.0
     """
     Tool movement and change commands.
 
@@ -215,7 +219,12 @@ class ToolCommands:
              at the extruder speed, started first
           2. Extruder retract of extruder_clearance_length at the same speed,
              so the two motors run together with the ACE slightly ahead
-          3. Wait for the ACE to finish, check the extruder sensor
+          3. Stop the ACE the moment the extruder sensor clears (or once the move is over)
+
+        Past the sensor the tip is out of the gears, so an ACE left running would pull it
+        freely for the rest of the extruder move, up to ACE_MAX_PULL_RATE, on top of the
+        toolchange_retract_length pull that follows. Stopping at the sensor makes that
+        pull start from the sensor, as toolchange_retract_length assumes.
 
         After this completes, _retract_to_gate() pulls the remaining
         toolchange_retract_length to clear the splitter.
@@ -272,13 +281,17 @@ class ToolCommands:
             # Step 2: extruder retracts while the ACE keeps tension
             logging.info(f'ToolCommands: Extruder retract {extruder_retract_length}mm at {extruder_speed}mm/s (synchronized)')
             self._extruder_move(-extruder_retract_length, extruder_speed)
-            self.controller.toolhead.wait_moves()
 
-            # Step 3: stop the ACE (it would otherwise finish the oversized pull), then check
+            # Step 3: stop the ACE as soon as the sensor clears, not when the extruder is done
+            cleared = self._wait_for_sensor_clear(self.controller.extruder_sensor,
+                                                  extruder_duration + self.MOVE_START_SLACK)
             device.stop_feeding(local_gate, stop_callback)
+            if cleared:
+                logging.info('ToolCommands: Extruder sensor cleared during the retract; ACE stopped')
+            self.controller.toolhead.wait_moves()
             self.reactor.pause(self.reactor.monotonic() + 0.5)
             device.wait_ready()
-            if not self._check_sensor(self.controller.extruder_sensor):
+            if cleared or not self._check_sensor(self.controller.extruder_sensor):
                 logging.info(f'ToolCommands: Extruder sensor cleared after {attempt + 1} attempt(s)')
                 self.gcode.respond_info(f'ACE: Sensor cleared after {attempt + 1} attempt(s)')
                 return
@@ -618,6 +631,28 @@ class ToolCommands:
     # ========================================================================
     # Helper Methods for Tool Change Sequences
     # ========================================================================
+
+    def _wait_for_sensor_clear(self, sensor, timeout):
+        """
+        Watch a sensor while queued moves run, returning as soon as it reads empty.
+
+        Args:
+            sensor: Sensor object (extruder_sensor or toolhead_sensor)
+            timeout: Seconds to keep watching
+
+        Returns:
+            bool: True if the sensor cleared within the timeout
+        """
+        if sensor is None:
+            return False
+        end = self.reactor.monotonic() + timeout
+        while True:
+            if not self._check_sensor(sensor):
+                return True
+            now = self.reactor.monotonic()
+            if now >= end:
+                return False
+            self.reactor.pause(min(end, now + self.SENSOR_POLL_INTERVAL))
 
     def _check_sensor(self, sensor):
         """
