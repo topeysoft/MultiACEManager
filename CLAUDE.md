@@ -8,8 +8,10 @@ filament units. Installed on the printer as `~/klipper/klippy/extras/ace/` (pack
 ```
 ./dev.sh check              # py_compile everything
 ./dev.sh test               # offline suite: tests/ against the simulator, <1s
-./dev.sh deploy             # rsync -> obi1, restart Klipper, wait, print ACE status
-./dev.sh loop               # check + test + deploy
+./dev.sh deploy             # obi1's ~/KlipperACE clone -> HEAD (committed + pushed), restart, status
+./dev.sh deploy --wip       # rsync the working tree into that clone instead (shows as dirty)
+./dev.sh versions           # every ACE printer vs origin; exit 1 on drift
+./dev.sh loop               # check + test + deploy (--wip when uncommitted)
 ./dev.sh gcode "ACE_GET_STATUS"   # run G-code, print console replies
 ./dev.sh status             # devices / gates / slots from the ace object
 ./dev.sh ace-log            # ACE log lines since last Klipper start
@@ -54,8 +56,13 @@ Python for local work: `~/.venvs/klipperace` (pyserial, pytest, requests). Do no
 
 - This checkout lives in iCloud Drive. Evicted files hang on read; `brctl download <path>` fetches
   them. `ls -lO` shows `dataless` for evicted files.
-- obi1 also has a stale clone at `~/KlipperACE` (Moonraker update-manager entry, branch
-  `multi-ace-dev`). The installed code is what `dev.sh deploy` rsyncs, not that clone.
+- One install per printer: the `~/KlipperACE` clone. `~/klipper/klippy/extras/ace` is a symlink to
+  its `extras/`, Moonraker's `ace_manager.py` a symlink into it, and `[update_manager KlipperACE]`
+  tracks `multi-ace-dev`, so Mainsail's Software Updates shows what actually runs. Since
+  2026-10-03 on obi1 and r2d2; before that r2d2 ran per-file links at 5afb057 while obi1 got
+  rsync'd copies, and nothing noticed. `deploy` sets this layout up (old install moved to
+  `~/ace-install-backup-*`), `install.sh` does the same. Finish a `--wip` session with a real
+  deploy, and run `./dev.sh versions` after touching any printer.
 - ACE units enumerate under `/dev/serial/by-path/`; the `usbv2` symlink can lag at boot, the
   driver retries. Both by-id links collide (`usb-ANYCUBIC_ACE_1`), so by-path is required.
 - Packet framing parses header + length (`find_packet_in_buffer`), never the tail byte. A 0xFE

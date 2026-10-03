@@ -74,98 +74,19 @@ check_folders()
 
 link_extension()
 {
-    echo "Linking ACE modular architecture to Klipper..."
+    echo "Linking ACE package to Klipper..."
 
-    # Create ace package directory structure
-    echo -n "  - Creating ace package directory... "
-    mkdir -p "${KLIPPER_HOME}/klippy/extras/ace"
-    echo "[OK]"
-
-    # Link modular architecture files
-    echo -n "  - Linking ace/__init__.py (entry point)... "
-    ln -sf "${SRCDIR}/extras/__init__.py" "${KLIPPER_HOME}/klippy/extras/ace/__init__.py"
-    echo "[OK]"
-
-    echo -n "  - Linking ace/exceptions.py... "
-    ln -sf "${SRCDIR}/extras/exceptions.py" "${KLIPPER_HOME}/klippy/extras/ace/exceptions.py"
-    echo "[OK]"
-
-    echo -n "  - Linking ace/ace_controller.py... "
-    ln -sf "${SRCDIR}/extras/ace_controller.py" "${KLIPPER_HOME}/klippy/extras/ace/ace_controller.py"
-    echo "[OK]"
-
-    # Link protocol package
-    echo -n "  - Creating ace/protocol directory... "
-    mkdir -p "${KLIPPER_HOME}/klippy/extras/ace/protocol"
-    echo "[OK]"
-
-    echo -n "  - Linking protocol/*.py files... "
-    protocol_count=0
-    for file in "${SRCDIR}/extras/protocol"/*.py; do
-        filename=$(basename "$file")
-        ln -sf "$file" "${KLIPPER_HOME}/klippy/extras/ace/protocol/$filename"
-        protocol_count=$((protocol_count + 1))
-    done
-    echo "($protocol_count files) [OK]"
-
-    # Link device package
-    echo -n "  - Creating ace/device directory... "
-    mkdir -p "${KLIPPER_HOME}/klippy/extras/ace/device"
-    echo "[OK]"
-
-    echo -n "  - Linking device/*.py files... "
-    device_count=0
-    for file in "${SRCDIR}/extras/device"/*.py; do
-        filename=$(basename "$file")
-        ln -sf "$file" "${KLIPPER_HOME}/klippy/extras/ace/device/$filename"
-        device_count=$((device_count + 1))
-    done
-    echo "($device_count files) [OK]"
-
-    # Link sensors package
-    echo -n "  - Creating ace/sensors directory... "
-    mkdir -p "${KLIPPER_HOME}/klippy/extras/ace/sensors"
-    echo "[OK]"
-
-    echo -n "  - Linking sensors/*.py files... "
-    sensors_count=0
-    for file in "${SRCDIR}/extras/sensors"/*.py; do
-        filename=$(basename "$file")
-        ln -sf "$file" "${KLIPPER_HOME}/klippy/extras/ace/sensors/$filename"
-        sensors_count=$((sensors_count + 1))
-    done
-    echo "($sensors_count files) [OK]"
-
-    # Link commands package
-    echo -n "  - Creating ace/commands directory... "
-    mkdir -p "${KLIPPER_HOME}/klippy/extras/ace/commands"
-    echo "[OK]"
-
-    echo -n "  - Linking commands/*.py files... "
-    commands_count=0
-    for file in "${SRCDIR}/extras/commands"/*.py; do
-        filename=$(basename "$file")
-        ln -sf "$file" "${KLIPPER_HOME}/klippy/extras/ace/commands/$filename"
-        commands_count=$((commands_count + 1))
-    done
-    echo "($commands_count files) [OK]"
-
-    # Calculate total files (core files + all package files)
-    total_files=$((3 + protocol_count + device_count + sensors_count + commands_count))
-
-    echo ""
-    echo "================================================"
-    echo "ACE Modular Architecture Installed!"
-    echo "================================================"
-    echo "  Total: $total_files modular files"
-    echo "    - Core: 3 files"
-    echo "    - Protocol: $protocol_count files"
-    echo "    - Device: $device_count files"
-    echo "    - Sensors: $sensors_count files"
-    echo "    - Commands: $commands_count files"
-    echo ""
-    echo "  Entry: ace/__init__.py:load_config()"
-    echo "  Architecture: AceController → AceDeviceManager → AceDevice"
+    # One link to the whole package, so files added by a later git pull load without
+    # re-running this script, and the clone (what Moonraker's update manager tracks) is
+    # exactly the code Klipper runs.
+    ACE_TARGET="${KLIPPER_HOME}/klippy/extras/ace"
+    if [ -e "$ACE_TARGET" ] && [ ! -L "$ACE_TARGET" ]; then
+        ACE_BACKUP="${HOME}/ace-install-backup-$(date +%Y%m%d-%H%M%S)"
+        echo "  - Moving the old per-file install aside to ${ACE_BACKUP}"
+        mv "$ACE_TARGET" "$ACE_BACKUP"
+    fi
+    ln -sfn "${SRCDIR}/extras" "$ACE_TARGET"
+    echo "  - ${ACE_TARGET} -> ${SRCDIR}/extras [OK]"
     echo ""
 }
 

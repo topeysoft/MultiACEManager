@@ -5,8 +5,11 @@
 #   ./dev.sh check                    syntax-compile every plugin file
 #   ./dev.sh test [pytest args]       run the offline test suite (simulator, no printer)
 #   ./dev.sh deploy [--dry|--no-restart]
-#                                     rsync extras/ + moonraker component, restart Klipper, wait, show ACE status
-#   ./dev.sh loop                     check + test + deploy   (the standard iteration)
+#                                     move the printer's ~/KlipperACE clone to HEAD (must be committed
+#                                     and pushed), restart Klipper, wait, show ACE status
+#   ./dev.sh deploy --wip             rsync the working tree into that clone instead (shows as dirty)
+#   ./dev.sh versions                 KlipperACE on every ACE printer vs origin; non-zero on drift
+#   ./dev.sh loop                     check + test + deploy (--wip when uncommitted; the standard iteration)
 #   ./dev.sh restart [klipper|moonraker|firmware]
 #   ./dev.sh wait [seconds]           block until Klipper is ready (or prints the error)
 #   ./dev.sh gcode "ACE_GET_STATUS"   run a G-code command and print its console replies
@@ -25,8 +28,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SBC_USER="${SBC_USER:-pi}"
 PRINTER="${ACE_PRINTER:-obi1}"
 VENV="${ACE_VENV:-$HOME/.venvs/klipperace}"
-REMOTE_ACE_DIR="~/klipper/klippy/extras/ace"
-REMOTE_MOONRAKER_COMPONENT="~/moonraker/moonraker/components/ace_manager.py"
+REMOTE_REPO="~/KlipperACE"
+ACE_PRINTERS="${ACE_PRINTERS:-obi1 r2d2}"
 
 resolve_printer() {
     case "$1" in
@@ -90,21 +93,141 @@ cmd_restart() {
     [ "$what" = "moonraker" ] || cmd_wait
 }
 
-cmd_deploy() {
-    local dry=0 restart=1
-    for a in "$@"; do case "$a" in --dry) dry=1 ;; --no-restart) restart=0 ;; esac; done
-    cmd_check
-    local rsync_args=(-rlptz --delete --exclude='__pycache__' --exclude='*.pyc' -e "ssh ${SSH_OPTS[*]}")
-    [ "$dry" -eq 1 ] && rsync_args+=(--dry-run -v)
-    echo "==> rsync extras/ -> $SSH_TARGET:$REMOTE_ACE_DIR"
-    rsync "${rsync_args[@]}" -i "$SCRIPT_DIR/extras/" "$SSH_TARGET:$REMOTE_ACE_DIR/" | grep -E '^[<>ch*]' | sed 's/^/    /' || true
-    if [ -f "$SCRIPT_DIR/moonraker/ace_manager.py" ]; then
-        echo "==> rsync moonraker/ace_manager.py"
-        rsync "${rsync_args[@]}" -i "$SCRIPT_DIR/moonraker/ace_manager.py" "$SSH_TARGET:$REMOTE_MOONRAKER_COMPONENT" | grep -E '^[<>ch*]' | sed 's/^/    /' || true
+# The printer's ~/KlipperACE clone is the install: Klipper's extras/ace and Moonraker's
+# ace_manager.py are symlinks into it, and Moonraker's update manager tracks it. So what the
+# Software Updates panel shows is what runs, and nothing can sit on an old copy unnoticed.
+# Runs on the printer: make the links (moving an old per-file install aside) and point the
+# update manager at the branch being deployed. Prints MOONRAKER_CHANGED when Moonraker
+# must restart to pick something up.
+remote_ensure_install() {
+    local branch="$1"
+    ssh "${SSH_OPTS[@]}" "$SSH_TARGET" bash -s -- "$branch" <<'EOF'
+set -e
+branch="$1"; repo="$HOME/KlipperACE"
+[ -d "$repo/.git" ] || git clone -q -b "$branch" https://github.com/topeysoft/MultiACEManager "$repo"
+ace="$HOME/klipper/klippy/extras/ace"
+if [ "$(readlink "$ace" || true)" != "$repo/extras" ]; then
+    if [ -e "$ace" ] && [ ! -L "$ace" ]; then
+        backup="$HOME/ace-install-backup-$(date +%Y%m%d-%H%M%S)"
+        mv "$ace" "$backup"; echo "    old install moved to $backup"
     fi
-    [ "$dry" -eq 1 ] && { echo "==> Dry run done"; return 0; }
-    [ "$restart" -eq 1 ] || { echo "==> Deployed (no restart)"; return 0; }
-    cmd_restart klipper && { sleep 6; cmd_status; }
+    ln -sfn "$repo/extras" "$ace"; echo "    linked $ace -> $repo/extras"
+fi
+comp="$HOME/moonraker/moonraker/components/ace_manager.py"
+if [ -d "$(dirname "$comp")" ] && [ "$(readlink "$comp" || true)" != "$repo/moonraker/ace_manager.py" ]; then
+    ln -sfn "$repo/moonraker/ace_manager.py" "$comp"; echo "    linked $comp"; echo MOONRAKER_CHANGED
+fi
+conf="$HOME/printer_data/config/moonraker.conf"
+if [ -f "$conf" ] && grep -q '^\[update_manager KlipperACE\]' "$conf"; then
+    current="$(sed -n '/^\[update_manager KlipperACE\]/,/^\[/s/^primary_branch:[[:space:]]*//p' "$conf")"
+    if [ "$current" != "$branch" ]; then
+        sed -i "/^\[update_manager KlipperACE\]/,/^\[/s/^primary_branch:.*/primary_branch: $branch/" "$conf"
+        echo "    update manager now tracks $branch (was ${current:-unset})"; echo MOONRAKER_CHANGED
+    fi
+fi
+EOF
+}
+
+cmd_deploy() {
+    local dry=0 restart=1 wip=0
+    for a in "$@"; do case "$a" in --dry) dry=1 ;; --no-restart) restart=0 ;; --wip) wip=1 ;; esac; done
+    cmd_check
+    local branch sha
+    branch="$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD)"
+    sha="$(git -C "$SCRIPT_DIR" rev-parse HEAD)"
+    if [ "$wip" -eq 0 ]; then
+        if [ -n "$(git -C "$SCRIPT_DIR" status --porcelain -- extras moonraker)" ]; then
+            echo "==> Uncommitted changes in extras/ or moonraker/. Commit and push, or use --wip for a throwaway test."
+            return 1
+        fi
+        git -C "$SCRIPT_DIR" fetch -q origin "$branch"
+        if ! git -C "$SCRIPT_DIR" merge-base --is-ancestor HEAD "origin/$branch"; then
+            echo "==> HEAD ${sha:0:7} is not on origin/$branch. Push first, so the printer can fetch it."
+            return 1
+        fi
+    fi
+    if [ "$dry" -eq 1 ]; then
+        echo "==> Dry run: $PRINTER would get $([ "$wip" -eq 1 ] && echo "the working tree (wip)" || echo "$branch @ ${sha:0:7}")"
+        cmd_versions || true
+        return 0
+    fi
+
+    echo "==> Checking the install layout on $PRINTER"
+    local out moonraker=0
+    out="$(remote_ensure_install "$branch")"
+    [ -n "$out" ] && echo "$out" | grep -v '^MOONRAKER_CHANGED$' || true
+    echo "$out" | grep -q '^MOONRAKER_CHANGED$' && moonraker=1
+
+    if [ "$wip" -eq 1 ]; then
+        local rsync_args=(-rlptz --delete --exclude='__pycache__' --exclude='*.pyc' -e "ssh ${SSH_OPTS[*]}" -i)
+        echo "==> rsync working tree -> $SSH_TARGET:$REMOTE_REPO (wip: the clone shows as dirty until the next deploy)"
+        out="$(rsync "${rsync_args[@]}" "$SCRIPT_DIR/extras/" "$SSH_TARGET:$REMOTE_REPO/extras/")"
+        echo "$out" | grep -E '^[<>ch*]' | sed 's/^/    /' || true
+        out="$(rsync "${rsync_args[@]}" "$SCRIPT_DIR/moonraker/ace_manager.py" "$SSH_TARGET:$REMOTE_REPO/moonraker/ace_manager.py")"
+        if echo "$out" | grep -qE '^[<>ch*]'; then echo "    moonraker/ace_manager.py"; moonraker=1; fi
+    else
+        echo "==> $PRINTER: $REMOTE_REPO -> $branch @ ${sha:0:7}"
+        out="$(ssh "${SSH_OPTS[@]}" "$SSH_TARGET" bash -s -- "$branch" "$sha" <<'EOF'
+set -e
+cd "$HOME/KlipperACE"
+before="$(md5sum moonraker/ace_manager.py 2>/dev/null || true)"
+old="$(git rev-parse --short HEAD)"
+git fetch -q origin "$1"
+git reset -q --hard
+git clean -qfd -- extras moonraker
+git checkout -q -B "$1" "$2"
+git branch -q --set-upstream-to="origin/$1"
+echo "    was $old"
+[ "$before" = "$(md5sum moonraker/ace_manager.py 2>/dev/null || true)" ] || echo MOONRAKER_CHANGED
+EOF
+)"
+        echo "$out" | grep -v '^MOONRAKER_CHANGED$' || true
+        echo "$out" | grep -q '^MOONRAKER_CHANGED$' && moonraker=1
+    fi
+
+    if [ "$restart" -eq 0 ]; then
+        echo "==> Deployed (no restart)$([ "$moonraker" -eq 1 ] && echo "; Moonraker needs a restart too")"
+    else
+        [ "$moonraker" -eq 1 ] && cmd_restart moonraker
+        cmd_restart klipper && { sleep 6; cmd_status; }
+    fi
+    cmd_versions || true
+}
+
+# KlipperACE on every ACE printer, compared with origin. Exit status 1 when any printer is
+# behind, dirty, unreachable or not on the linked install, so it can gate other scripts.
+cmd_versions() {
+    local branch drift=0 p host line sha dirty linked count
+    branch="$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD)"
+    git -C "$SCRIPT_DIR" fetch -q origin "$branch" || echo "    (could not fetch origin; comparing with the last fetch)"
+    echo "==> KlipperACE: origin/$branch is $(git -C "$SCRIPT_DIR" rev-parse --short "origin/$branch")"
+    for p in $ACE_PRINTERS; do
+        host="$(resolve_printer "$p")"
+        line="$(ssh "${SSH_OPTS[@]}" "${SBC_USER}@${host}" '
+            cd ~/KlipperACE 2>/dev/null || { echo "none - - -"; exit 0; }
+            dirty=$(git status --porcelain -- extras moonraker | wc -l)
+            [ "$(readlink ~/klipper/klippy/extras/ace)" = "$HOME/KlipperACE/extras" ] && linked=yes || linked=no
+            echo "$(git rev-parse HEAD) $(git rev-parse --abbrev-ref HEAD) $dirty $linked"' 2>/dev/null)" \
+            || { printf '    %-5s unreachable\n' "$p"; drift=1; continue; }
+        read -r sha pbranch dirty linked <<<"$line"
+        if [ "$sha" = "none" ]; then printf '    %-5s no ~/KlipperACE clone\n' "$p"; drift=1; continue; fi
+        local notes=()
+        if ! git -C "$SCRIPT_DIR" cat-file -e "$sha^{commit}" 2>/dev/null; then
+            notes+=("commit unknown here"); drift=1
+        else
+            count="$(git -C "$SCRIPT_DIR" rev-list --count "$sha..origin/$branch")"
+            [ "$count" -gt 0 ] && { notes+=("$count behind"); drift=1; }
+            count="$(git -C "$SCRIPT_DIR" rev-list --count "origin/$branch..$sha")"
+            [ "$count" -gt 0 ] && { notes+=("$count not on origin"); drift=1; }
+        fi
+        [ "$pbranch" != "$branch" ] && { notes+=("on branch $pbranch"); drift=1; }
+        [ "$dirty" -gt 0 ] && { notes+=("wip: $dirty changed file(s)"); drift=1; }
+        [ "$linked" != "yes" ] && { notes+=("old per-file install"); drift=1; }
+        [ ${#notes[@]} -eq 0 ] && notes=("up to date")
+        printf '    %-5s %s  %s\n' "$p" "${sha:0:7}" "$(IFS=,; echo "${notes[*]}" | sed 's/,/, /g')"
+    done
+    [ "$drift" -eq 0 ] || echo "    fix: ./dev.sh --printer <name> deploy"
+    return "$drift"
 }
 
 cmd_gcode() {
@@ -136,7 +259,11 @@ cmd_ssh() { ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "$@"; }
 
 cmd_sim() { cd "$SCRIPT_DIR" && "$PY" tests/ace_sim.py "$@"; }
 
-cmd_loop() { cmd_check && cmd_test -q && cmd_deploy; }
+cmd_loop() {
+    local mode=""
+    [ -n "$(git -C "$SCRIPT_DIR" status --porcelain -- extras moonraker)" ] && mode="--wip"
+    cmd_check && cmd_test -q && cmd_deploy $mode
+}
 
 cmd="${1:-help}"; shift || true
 case "$cmd" in
@@ -148,6 +275,7 @@ case "$cmd" in
     wait) cmd_wait "$@" ;;
     gcode) cmd_gcode "$@" ;;
     status) cmd_status ;;
+    versions) cmd_versions ;;
     log) cmd_log "$@" ;;
     ace-log) cmd_ace_log ;;
     ssh) cmd_ssh "$@" ;;

@@ -2,7 +2,7 @@
 [update_manager KlipperACE]
 type: git_repo
 path: ~/KlipperACE
-primary_branch: main
+primary_branch: multi-ace-dev
 origin: https://github.com/topeysoft/MultiACEManager
 managed_services: klipper
 is_system_service: False
