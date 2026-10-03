@@ -72,6 +72,13 @@ Python for local work: `~/.venvs/klipperace` (pyserial, pytest, requests). Do no
   and sometimes one EIO write error, then it reconnects. Harmless unless it repeats.
 
 - Units are found at startup and then by the hot-plug check in `AceDeviceManager._hotplug_check`
-  (every 5 s, `quick_scan` reads sysfs only; a unit must keep the same USB devnum for 15 s).
-  obi1's unit on USB 3-1.3.3 was re-enumerating every 3-4 s on 2026-10-01 (hardware: cable/port),
-  which is what made the gate count change between restarts.
+  (every 1 s, `quick_scan` reads sysfs only; a unit is used once seen twice on the same devnum).
+- **Keep-alive:** some units reboot when no request arrives for ~3.5 s and then re-enumerate every
+  ~3.6 s for as long as nobody talks to them (at boot, with Klipper stopped, between a probe's
+  close and the connection, and under the old 30 s idle / 10 s printing polls). That was obi1's
+  "flapping" unit in 2026-10-01 and both units on r2d2 2026-10-03, not cables. Polls are
+  `KEEPALIVE_INTERVAL` (1 s) in every state; don't slow them down. obi1's other unit (fw V1.3.856)
+  tolerates long gaps. Check flapping with `dmesg | grep "USB disconnect"` intervals.
+- Every byte a unit sends must be read on every poll, whether or not a request is pending. Reading
+  only while waiting let the tty fill (4095 bytes): Linux then stops reading the unit and every
+  request times out although usbmon shows the requests going out (r2d2, 2026-10-03).

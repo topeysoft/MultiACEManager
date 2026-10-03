@@ -146,6 +146,18 @@ def test_polls_slower_than_the_timeout_still_read_every_response(make_device, re
         "every reply but the one to the request just sent must have been read and handled"
 
 
+def test_ready_idle_unit_is_still_polled_every_keepalive(make_device, reactor):
+    """Some units reboot after ~3.5 s without a request; the old 30 s idle heartbeat (and
+    10 s while printing) made them reset every 3.6 s."""
+    from ace.protocol.constants import KEEPALIVE_INTERVAL
+    device, sim = make_device()
+    connect(device, reactor)
+    pump(device, reactor, polls=3)
+    assert device.is_ready()
+    reactor.advance(120)
+    assert device._get_adaptive_poll_interval() <= KEEPALIVE_INTERVAL < 3.0
+
+
 def test_corrupt_response_is_logged_and_skipped(make_device, reactor, caplog):
     device, sim = make_device()
     connect(device, reactor)

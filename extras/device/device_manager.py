@@ -10,10 +10,13 @@ from typing import List, Dict, Optional, Tuple
 from .ace_device import AceDevice
 from .device_discovery import AceDeviceDiscovery
 from .device_mapper import AceDeviceMapper
-from ..protocol.constants import GATES_PER_ACE
+from ..protocol.constants import GATES_PER_ACE, KEEPALIVE_INTERVAL
 
-HOTPLUG_INTERVAL = 5.0   # seconds between looks for units that appeared or came back
-HOTPLUG_STABLE = 15.0    # a unit is only used after this long on the same USB enumeration
+HOTPLUG_INTERVAL = 1.0   # seconds between looks for units that appeared or came back
+# A unit is used once it has been seen twice on the same USB enumeration. Not longer: a
+# unit nobody talks to reboots after ~3.5 s (see KEEPALIVE_INTERVAL), so it is only ever
+# "steady" once something connects to it; the old 15 s rule meant never.
+HOTPLUG_STABLE = 0.5
 
 
 def order_devices(devices, known_offsets=None, device_order=(), aliases=None):
@@ -631,9 +634,7 @@ class AceDeviceManager:
 
             # Log interval changes
             if interval != self._last_global_interval:
-                if interval == 30.0:
-                    logging.info(f"AceDeviceManager: All devices IDLE (30s heartbeat)")
-                elif interval <= 0.5:
+                if interval <= 0.5:
                     logging.debug(f"AceDeviceManager: Active devices detected ({interval}s polling)")
                 self._last_global_interval = interval
 
@@ -643,15 +644,14 @@ class AceDeviceManager:
             logging.error(f"AceDeviceManager: Global I/O handler error: {e}")
             import traceback
             traceback.print_exc()
-            return eventtime + 5.0  # Failsafe
+            return eventtime + KEEPALIVE_INTERVAL  # Failsafe: units reboot if left quiet
 
     # ---- hot-plug ---------------------------------------------------------
 
     def _hotplug_check(self, eventtime):
         """
-        Every few seconds: reconnect units that gave up, and pick up units that appeared
-        after startup. A unit is only used once it has stayed on the same USB enumeration
-        for HOTPLUG_STABLE seconds, so one that keeps dropping off USB is left alone.
+        Every HOTPLUG_INTERVAL: reconnect units that gave up, and pick up units that
+        appeared after startup, once seen twice on the same USB enumeration.
         """
         if eventtime < self._next_hotplug:
             return
@@ -767,7 +767,9 @@ class AceDeviceManager:
                 return self.fixed_poll_interval
 
             # Adaptive polling: find fastest interval needed
-            fastest_interval = 30.0  # Start with slowest (idle)
+            # Never slower than the keep-alive, also with nothing connected: the hot-plug
+            # check runs on this timer and must catch a unit within its ~3.5 s window
+            fastest_interval = KEEPALIVE_INTERVAL
 
             for device_info in self.ace_devices:
                 device = device_info['instance']
@@ -781,7 +783,7 @@ class AceDeviceManager:
 
         except Exception as e:
             logging.warning(f"AceDeviceManager: Error in polling interval calculation: {e}")
-            return 5.0  # Failsafe
+            return KEEPALIVE_INTERVAL  # Failsafe
 
     def wait_all_devices_ready(self, timeout: float = 30.0):
         """

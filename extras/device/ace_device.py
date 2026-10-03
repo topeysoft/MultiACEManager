@@ -14,6 +14,7 @@ import traceback
 from typing import Optional, Dict, Any, Callable
 
 from ..protocol.constants import (
+    KEEPALIVE_INTERVAL,
     READY_WAIT_DELAY,
     CONNECT_RETRY_DELAY,
     CONNECT_RETRY_MAX,
@@ -92,7 +93,6 @@ class AceDevice:
         # Activity tracking for adaptive polling (Klipper best practice)
         self._last_command_time = 0.0
         self._printer = None  # Will be set to access print_stats
-        self._last_poll_interval = None  # Track interval changes for logging
 
         # Device info
         self.num_gates = GATES_PER_ACE
@@ -553,53 +553,14 @@ class AceDevice:
 
     def _get_adaptive_poll_interval(self):
         """
-        Get adaptive polling interval based on activity state.
-        Follows Klipper best practice of varying timer intervals.
-
-        Prevents "Timer too close" errors by avoiding excessive polling.
-
-        Returns:
-            float: Seconds until next poll
+        Seconds until the next poll: 0.2 while commands are queued, otherwise
+        KEEPALIVE_INTERVAL in every state, printing and idle included. Slower polling
+        (10 s printing, 30 s idle) made units that reboot after ~3.5 s without a request
+        reset every 3.6 s; one get_status a second is negligible load.
         """
-        try:
-            # Fast polling when queue has items (but not too fast to avoid timer conflicts)
-            if self._queue and not self._queue.empty():
-                return 0.2  # Increased from 0.1 to reduce timer pressure
-
-            # Check if currently printing
-            is_printing = False
-            if self._printer:
-                try:
-                    print_stats = self._printer.lookup_object("print_stats", None)
-                    if print_stats:
-                        is_printing = print_stats.state == "printing"
-                except:
-                    pass
-
-            # Adaptive intervals based on state
-            now = self.reactor.monotonic()
-            time_since_command = now - self._last_command_time
-
-            if is_printing:
-                # During print: slow polling (status rarely changes mid-print)
-                return 10.0  # Increased from 5.0 - printing state is very stable
-            elif time_since_command < 10.0:
-                # Recent activity: medium polling for 10s after last command
-                return 2.0  # Increased from 1.0 to reduce CPU load
-            elif self._info.get('status') == 'busy':
-                # Device busy: poll more frequently
-                return 2.0  # Increased from 1.0 to reduce CPU load
-            else:
-                # Idle: very slow heartbeat (just for disconnect detection)
-                interval = 30.0
-                if self._last_poll_interval != interval:
-                    logging.info(f"AceDevice {self.device_id}: Entering IDLE mode (30s heartbeat)")
-                    self._last_poll_interval = interval
-                return interval
-        except Exception as e:
-            # Failsafe: return conservative interval on any error
-            logging.warning(f"AceDevice: Error in adaptive polling: {e}")
-            return 5.0
+        if self._queue and not self._queue.empty():
+            return 0.2
+        return KEEPALIVE_INTERVAL
 
     # ========================================================================
     # Simple command API - these just send requests, no orchestration

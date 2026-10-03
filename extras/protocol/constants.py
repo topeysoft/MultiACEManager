@@ -19,6 +19,10 @@ WRITER_POLL_INTERVAL = 2.0  # Fixed interval when adaptive polling disabled
 DEFAULT_ADAPTIVE_POLLING = True  # Enable adaptive polling by default
 SENSOR_POLL_INTERVAL = 0.5  # Reasonable sensor polling rate
 REQUEST_TIMEOUT = 2.0  # Match reference - fail fast on communication errors
+# Longest gap between requests to a unit. Some units reboot when no request arrives for
+# ~3.5 s (r2d2 and obi1, 2026-10-03: two units re-enumerated every 3.6 s whenever the host
+# went quiet, including the old 30 s idle and 10 s printing heartbeats).
+KEEPALIVE_INTERVAL = 1.0
 FEED_ASSIST_DELAY = 0.7
 FEED_ASSIST_DISABLE_DELAY = 0.3
 

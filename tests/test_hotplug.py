@@ -1,8 +1,8 @@
 """
-Hot-plug: a unit that was off, still booting, or flapping when Klipper started is picked
-up once it has been steady on USB, without a Klipper restart. A unit that gave up
-retrying is reconnected when its port is back. A unit that keeps dropping off USB is
-never used.
+Hot-plug: a unit that was off or still booting when Klipper started is picked up once it
+has been seen twice on the same USB enumeration, without a Klipper restart. A unit that
+gave up retrying is reconnected when its port is back. A unit nobody talks to reboots
+every ~3.6 s, so it has to be caught inside one of those windows.
 """
 import logging
 
@@ -79,10 +79,11 @@ def plug(bus, unit, devnum):
 
 
 def look(m, reactor, seconds):
-    """Let the hot-plug check run for ``seconds`` of printer time, every 5 s."""
+    """Let the hot-plug check run for ``seconds`` of printer time, every HOTPLUG_INTERVAL."""
+    from ace.device.device_manager import HOTPLUG_INTERVAL
     end = reactor.monotonic() + seconds
     while reactor.monotonic() < end:
-        reactor.advance(5.0)
+        reactor.advance(HOTPLUG_INTERVAL)
         m._hotplug_check(reactor.monotonic())
 
 
@@ -100,9 +101,9 @@ def boot_with(m, reactor, unit, offset=0):
 def test_unit_is_picked_up_once_steady(hp, reactor):
     m, bus = hp
     plug(bus, A, devnum=40)
-    look(m, reactor, 10)
-    assert m.ace_devices == [], "not before it has been steady for 15 s"
-    look(m, reactor, 10)
+    m._hotplug_check(reactor.monotonic())
+    assert m.ace_devices == [], "not on the first sighting"
+    look(m, reactor, 1)
     assert [d["device_id"] for d in m.ace_devices] == [A["device_id"]]
     assert m.total_gates == 4 and m.ace_devices[0]["name"] == "ACE_1"
     reactor.advance(0.1)
@@ -111,12 +112,33 @@ def test_unit_is_picked_up_once_steady(hp, reactor):
     assert m.device_mapper.offsets == {A["device_id"]: 0} and m.device_mapper.saved == 1
 
 
-def test_unit_that_keeps_dropping_off_is_never_used(hp, reactor):
+def test_unit_that_reboots_when_left_alone_is_caught_in_its_window(hp, reactor):
+    """r2d2 and obi1, 2026-10-03: an ignored unit re-enumerates every ~3.6 s. The old 15 s
+    steadiness rule meant it was never used; it must be connected well inside 3.5 s."""
     m, bus = hp
-    for devnum in range(40, 52):          # re-enumerates every 5 s for a minute
-        plug(bus, A, devnum=devnum)
-        look(m, reactor, 5)
+    plug(bus, A, devnum=40)
+    look(m, reactor, 2.5)
+    assert [d["device_id"] for d in m.ace_devices] == [A["device_id"]]
+
+
+def test_unit_that_re_enumerated_between_looks_waits_for_a_second_sighting(hp, reactor):
+    from ace.device.device_manager import HOTPLUG_INTERVAL
+    m, bus = hp
+    plug(bus, A, devnum=40)
+    m._hotplug_check(reactor.monotonic())
+    reactor.advance(HOTPLUG_INTERVAL)
+    plug(bus, A, devnum=41)
+    m._hotplug_check(reactor.monotonic())
     assert m.ace_devices == []
+
+
+def test_manager_polls_at_keepalive_rate_even_with_nothing_connected(hp):
+    """The hot-plug check runs on the I/O timer; a 30 s idle timer could never catch a
+    unit that reboots every 3.6 s."""
+    from ace.protocol.constants import KEEPALIVE_INTERVAL
+    m, _ = hp
+    m.adaptive_polling = True
+    assert m._get_global_adaptive_interval() <= KEEPALIVE_INTERVAL
 
 
 def test_never_added_during_a_print(hp, reactor):
