@@ -293,7 +293,7 @@ This enables:
 
 ### Phase 6: Complete Implementation
 - Full tool change sequence (unload/load with sensors)
-- Endless spool logic (material matching)
+- Endless spool logic (material + colour matching, `AceController._find_endless_replacement`)
 - Hot-plug event handling
 - Dryer commands
 

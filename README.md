@@ -43,7 +43,7 @@
 - Feed Assist on ACE side
 - ACE Pro dryer control: start by temperature/time and stop ♨️
 - Gate mapping: color, material, recommended temperature 🎯
-- Endless Spool mode (auto-switch when filament ends) ♾️
+- Endless Spool mode (auto-switch when filament ends) ♾️ — only to a loaded spool of the same material and colour (RFID tag data first, else the `ACE_GATE_MAP` values; colours within RGB distance 70); with no match, or an unknown colour, the print stays paused
 - Integration with filament sensors and Klipper macros 🧩
 
 ## 📦 Requirements
@@ -258,7 +258,7 @@ ACE adds commands available from Klipper console/macros. For a quick cheat sheet
 ### Configuration
 
 - `ACE_GATE_MAP GATE=<n> [DEVICE=<id|alias>] [COLOR=<hexRGB>] [TYPE=<material>] [TEMP=<°C>]` — set gate metadata
-- `ACE_ENDLESS_SPOOL [ENABLE=<0|1>]` — toggle endless spool (no argument shows status)
+- `ACE_ENDLESS_SPOOL [ENABLE=<0|1>]` — toggle endless spool (no argument shows status); on runout it continues only on a spool with the same material and colour
 
 ### Status & Diagnostics
 

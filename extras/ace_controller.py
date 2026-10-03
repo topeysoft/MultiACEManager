@@ -269,34 +269,19 @@ class AceController:
                     if self.save_variables.allVariables.get('ace_endless_spool', False):
                         logging.info('AceController: Endless spool enabled, searching for replacement')
 
-                        # Get material configuration
-                        ace_material = self.save_variables.allVariables.get('ace_gate_type', [''] * self.device_manager.total_gates)
+                        replacement_gate = self._find_endless_replacement(current_index)
 
-                        # Ensure material array matches total gates
-                        while len(ace_material) < self.device_manager.total_gates:
-                            ace_material.append('')
-
-                        # Get current material type
-                        runout_material = ace_material[current_index] if current_index < len(ace_material) else ''
-
-                        # Get all gate statuses from device manager
-                        aggregated_status = self.device_manager.get_aggregated_status()
-                        all_slots = aggregated_status.get('slots', [])
-
-                        # Filter available spools: not empty, same material, not the runout gate
-                        spools = list(filter(
-                            lambda x: x['status'] != 'empty'
-                                and x['index'] != current_index
-                                and (x['index'] < len(ace_material) and ace_material[x['index']] == runout_material),
-                            all_slots
-                        ))
-
-                        if len(spools) == 0:
-                            logging.warning("AceController: No suitable spools for endless spool - no matching material or all empty")
-                            self.gcode.respond_info(f'Filament runout on T{current_index}! No matching spools available (material: {runout_material})')
+                        if replacement_gate is None:
+                            runout_slot = next((s for s in self.device_manager.get_aggregated_status().get('slots', [])
+                                                if s.get('index') == current_index), None)
+                            runout_material, runout_color = self._gate_material_and_color(current_index, runout_slot)
+                            colour_text = ('#%02X%02X%02X' % runout_color) if runout_color else 'unknown'
+                            logging.warning("AceController: No suitable spools for endless spool - no matching colour and material, or all empty")
+                            self.gcode.respond_info(
+                                f'Filament runout on T{current_index}! No matching spools available '
+                                f'(material: {runout_material or "unknown"}, colour: {colour_text})')
                         else:
-                            replacement_gate = spools[0]['index']
-                            logging.info(f'AceController: Endless spool - switching from T{current_index} to T{replacement_gate} (material: {runout_material})')
+                            logging.info(f'AceController: Endless spool - switching from T{current_index} to T{replacement_gate}')
                             self.gcode.respond_info(f'Endless spool: T{current_index} empty, switching to T{replacement_gate}')
 
                             # Execute tool change
@@ -310,6 +295,89 @@ class AceController:
                 logging.error(f"AceController: Error handling runout: {e}")
                 import traceback
                 traceback.print_exc()
+
+    # RGB distance under which two colours count as the same filament.
+    # Same rule as the Astromech UI (printer/astromech_intent.py COLOR_MATCH).
+    ENDLESS_COLOR_MATCH = 70
+
+    @staticmethod
+    def _parse_hex_color(value):
+        """'FFFFFF' / '#ffffff' -> (255, 255, 255); anything else -> None."""
+        if not isinstance(value, str):
+            return None
+        value = value.strip().lstrip('#')
+        if len(value) != 6:
+            return None
+        try:
+            return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
+        except ValueError:
+            return None
+
+    def _gate_material_and_color(self, gate, slot=None):
+        """
+        Effective (material, colour) for a global gate index.
+
+        The slot's RFID data wins when present (non-empty ``type``, ``color``
+        other than [0, 0, 0]); otherwise the saved ``ace_gate_type`` /
+        ``ace_gate_color`` variables. Material is upper-cased and stripped
+        ('' when unknown); colour is an (r, g, b) tuple or None when unknown.
+        """
+        variables = self.save_variables.allVariables
+        saved_types = variables.get('ace_gate_type') or []
+        saved_colors = variables.get('ace_gate_color') or []
+
+        material = ''
+        color = None
+        if slot is not None:
+            tag_type = slot.get('type')
+            if isinstance(tag_type, str) and tag_type.strip():
+                material = tag_type
+            tag_color = slot.get('color')
+            if (isinstance(tag_color, (list, tuple)) and len(tag_color) >= 3
+                    and any(tag_color[:3])):
+                color = tuple(int(c) for c in tag_color[:3])
+
+        if not material and gate < len(saved_types) and isinstance(saved_types[gate], str):
+            material = saved_types[gate]
+        if color is None and gate < len(saved_colors):
+            color = self._parse_hex_color(saved_colors[gate])
+
+        return material.strip().upper(), color
+
+    def _find_endless_replacement(self, current_index):
+        """
+        Pick the gate endless spool should continue on after ``current_index``
+        runs out, or None.
+
+        A candidate is any other gate whose slot is not 'empty', with the same
+        material (case/whitespace-insensitive) and a colour within RGB
+        distance < ENDLESS_COLOR_MATCH of the runout gate's colour. Unknown
+        material or colour on either side never matches. The closest colour
+        wins; ties go to the lowest gate index.
+        """
+        slots = self.device_manager.get_aggregated_status().get('slots', [])
+        by_index = {s.get('index'): s for s in slots}
+
+        runout_material, runout_color = self._gate_material_and_color(
+            current_index, by_index.get(current_index))
+        if not runout_material or runout_color is None:
+            return None
+
+        best = None  # (distance, index)
+        for slot in slots:
+            index = slot.get('index')
+            if index is None or index == current_index or slot.get('status') == 'empty':
+                continue
+            material, color = self._gate_material_and_color(index, slot)
+            if material != runout_material or color is None:
+                continue
+            distance = sum((a - b) ** 2 for a, b in zip(color, runout_color)) ** 0.5
+            if distance >= self.ENDLESS_COLOR_MATCH:
+                continue
+            if best is None or (distance, index) < best:
+                best = (distance, index)
+
+        return best[1] if best else None
 
     def _register_commands(self):
         """Register G-code commands via command modules"""
