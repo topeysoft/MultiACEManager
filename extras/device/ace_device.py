@@ -75,6 +75,7 @@ class AceDevice:
 
         # Request/response handling
         self._callback_map = {}
+        self._pending_id = None  # id of the request `lock` waits on
         self._request_id = 0
         self._queue = None  # Will be created in _handle_ready
 
@@ -194,6 +195,7 @@ class AceDevice:
                 self._connection_retry_backoff = 1.0
                 self._consecutive_write_errors = 0
                 self.lock = False
+                self._pending_id = None
                 self.read_buffer = bytearray()
 
                 logging.info(f'AceDevice: Successfully connected to {self.serial_id}')
@@ -301,18 +303,17 @@ class AceDevice:
         # Note: No return value - timer is managed by DeviceManager
 
     def _process_incoming_data(self, eventtime):
-        """Read and process responses from ACE device"""
-        # Check for request timeout (match reference implementation)
-        if self.lock and (self.reactor.monotonic() - self.send_time) > REQUEST_TIMEOUT:
-            self.lock = False
-            self.read_buffer = bytearray()
-            logging.warning(f"AceDevice: Request timeout after {REQUEST_TIMEOUT}s")
+        """Read and process responses from ACE device.
 
+        Reads whatever has arrived, before the timeout check and whether or not a request
+        is pending, and handles every complete packet. Polls can be as slow as
+        REQUEST_TIMEOUT (2 s while a unit reads 'busy'); reading only while a request was
+        pending meant each slow poll timed the request out first and skipped the read, so
+        replies piled up until the tty filled and Linux stopped reading the unit
+        (r2d2, 2026-10-03)."""
         try:
-            if self.lock and self._serial.in_waiting:
-                raw_bytes = self._serial.read(size=self._serial.in_waiting)
-            else:
-                raw_bytes = bytearray()
+            waiting = self._serial.in_waiting
+            raw_bytes = self._serial.read(size=waiting) if waiting else b''
         except Exception as e:
             logging.error(f"AceDevice: Unable to communicate: {e}")
             self.lock = False
@@ -320,33 +321,39 @@ class AceDevice:
             self._schedule_connect()
             return  # Just return, timer scheduling handled by _io_handler
 
-        if len(raw_bytes):
-            # Use packet finder from protocol module
-            text_buffer = self.read_buffer + raw_bytes
-            packet, self.read_buffer = AcePacket.find_packet_in_buffer(text_buffer)
+        if raw_bytes:
+            buffer = self.read_buffer + raw_bytes
+            while True:
+                packet, buffer = AcePacket.find_packet_in_buffer(buffer)
+                if not packet:
+                    break
+                self._handle_packet(packet)
+            self.read_buffer = buffer
 
-            if packet:
-                # Decode packet
-                response, error = AcePacket.decode(packet)
+        if self.lock and (self.reactor.monotonic() - self.send_time) > REQUEST_TIMEOUT:
+            self.lock = False
+            self.read_buffer = bytearray()
+            # A reply that turns up later is logged as unknown, as before: its caller has moved on
+            self._callback_map.pop(self._pending_id, None)
+            logging.warning(f"AceDevice: Request timeout after {REQUEST_TIMEOUT}s")
 
-                if error:
-                    logging.warning(f"AceDevice: Packet decode error: {error}")
-                    return
-
-                # Process response
-                try:
-                    request_id = response.get('id')
-
-                    if request_id in self._callback_map:
-                        callback = self._callback_map.pop(request_id)
-                        self.lock = False
-                        # Execute callback
-                        callback(response)
-                    else:
-                        logging.warning(f"AceDevice: Received response for unknown request ID {request_id}")
-                except Exception as e:
-                    logging.error(f"AceDevice: Error processing response: {e}")
+    def _handle_packet(self, packet):
+        response, error = AcePacket.decode(packet)
+        if error:
+            logging.warning(f"AceDevice: Packet decode error: {error}")
+            return
+        try:
+            request_id = response.get('id')
+            if request_id in self._callback_map:
+                callback = self._callback_map.pop(request_id)
+                if request_id == self._pending_id:
                     self.lock = False
+                callback(response)
+            else:
+                logging.warning(f"AceDevice: Received response for unknown request ID {request_id}")
+        except Exception as e:
+            logging.error(f"AceDevice: Error processing response: {e}")
+            self.lock = False
 
     def _process_outgoing_requests(self, eventtime):
         """Send requests to ACE device"""
@@ -378,6 +385,7 @@ class AceDevice:
                     if task is not None:
                         request_id = self._get_next_request_id()
                         self._callback_map[request_id] = task[1]
+                        self._pending_id = request_id
                         task[0]['id'] = request_id
                         self._send_request(task[0])
                         self._last_command_time = eventtime  # Track activity
@@ -385,6 +393,7 @@ class AceDevice:
                     # No user requests - send status poll
                     request_id = self._get_next_request_id()
                     self._callback_map[request_id] = status_callback
+                    self._pending_id = request_id
                     self._send_request({"id": request_id, "method": "get_status"})
 
                 self.send_time = eventtime

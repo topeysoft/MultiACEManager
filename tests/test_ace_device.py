@@ -130,6 +130,22 @@ def test_dropped_response_times_out_and_recovers(make_device, reactor, caplog):
     assert device._connected and device.is_ready()
 
 
+def test_polls_slower_than_the_timeout_still_read_every_response(make_device, reactor, caplog):
+    """r2d2, 2026-10-03: while a unit reads 'busy' (also the status before its first
+    reply) DeviceManager polls every 2.0 s, the same as REQUEST_TIMEOUT. Each poll timed
+    the pending request out before reading, then skipped the read because nothing was
+    pending, so no reply was ever read; the tty filled (4095 bytes) and Linux stopped
+    reading the unit. Arrived data must be read whatever the request state."""
+    from ace.protocol.constants import REQUEST_TIMEOUT
+    device, sim = make_device()
+    connect(device, reactor)
+    pump(device, reactor, polls=5, interval=REQUEST_TIMEOUT + 0.05)
+    assert "Request timeout" not in caplog.text
+    assert device.is_ready()
+    assert list(device._callback_map) == [device._pending_id], \
+        "every reply but the one to the request just sent must have been read and handled"
+
+
 def test_corrupt_response_is_logged_and_skipped(make_device, reactor, caplog):
     device, sim = make_device()
     connect(device, reactor)
